@@ -332,7 +332,30 @@ export function createParlorHandler(options = {}) {
     child.on("error", () => res.destroy());
     child.on("exit", () => children.delete(child));
     res.on("close", () => child.kill());
+    return child;
   }
+
+  /**
+   * Encodes running on the NVIDIA card, oldest first. A GeForce card takes only a handful at once,
+   * and fast flipping can leave old ones finishing; past six, the oldest is stopped to make room.
+   */
+  const MAX_NVENC = 6;
+  const nvencRunning = [];
+  function nvencRoom() {
+    while (nvencRunning.length >= MAX_NVENC) nvencRunning.shift().stop();
+  }
+  function nvencAdd(child, stop) {
+    if (!child) return;
+    const item = { child, stop };
+    nvencRunning.push(item);
+    const done = () => {
+      const at = nvencRunning.indexOf(item);
+      if (at >= 0) nvencRunning.splice(at, 1);
+    };
+    child.once("exit", done);
+    child.once("error", done);
+  }
+  const usesNvenc = (encode) => Boolean(encode?.includes("h264_nvenc"));
 
   function sendJson(res, code, body) {
     res.statusCode = code;
@@ -413,7 +436,9 @@ export function createParlorHandler(options = {}) {
     args.push("-c:a", "aac", "-ac", "2", "-b:a", "192k", "-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "pipe:1");
     res.statusCode = 200;
     res.setHeader("Content-Type", "video/mp4");
-    run(FFMPEG, args, res);
+    if (usesNvenc(encode)) nvencRoom();
+    const child = run(FFMPEG, args, res);
+    if (usesNvenc(encode)) nvencAdd(child, () => child.kill());
   }
 
   // Each text subtitle track is copied out of its film once, into Data\subs-cache, and every later
@@ -840,7 +865,10 @@ export function createParlorHandler(options = {}) {
       "-hls_segment_filename", "seg%05d.m4s", "index.m3u8",
     );
     // Run inside the session folder: ffmpeg puts the init piece in its working folder, whatever the playlist path says.
+    if (usesNvenc(encode)) nvencRoom();
     const child = spawn(FFMPEG, args, { cwd: dir, stdio: ["ignore", "ignore", "ignore"], windowsHide: true });
+    // Stopped this way, the phone's next request finds nothing and it tunes again; the folder goes with the session.
+    if (usesNvenc(encode)) nvencAdd(child, () => child.kill());
     children.add(child);
     child.on("error", () => children.delete(child));
     child.on("exit", () => children.delete(child));
@@ -860,11 +888,18 @@ export function createParlorHandler(options = {}) {
       const key = `${id}?${query.toString()}`;
       if (!session || session.key !== key) {
         endHls(sid);
-        // The same phone moved on: let its previous stream finish its last requests, then stop it.
+        // The same phone moved on: let its previous stream finish its last requests, then stop it. When
+        // flipping fast, only the stream just left gets that grace; any older ones stop now.
         const phone = sid.split("-")[0];
-        for (const other of hlsSessions.keys()) if (other !== sid && other.split("-")[0] === phone) setTimeout(() => endHls(other), 5000);
+        const older = [...hlsSessions.entries()].filter(([other]) => other !== sid && other.split("-")[0] === phone).sort((a, b) => a[1].started - b[1].started);
+        for (const [other] of older.slice(0, -1)) endHls(other);
+        const [last, lastSession] = older.at(-1) ?? [];
+        if (last && !lastSession.leaving) {
+          lastSession.leaving = true;
+          setTimeout(() => endHls(last), 5000);
+        }
         // Recorded before ffmpeg starts, so a second request for the same playlist joins this stream instead of starting another.
-        session = { key, lastHit: Date.now(), ready: startHls(sid, entry, query).catch(() => null) };
+        session = { key, started: Date.now(), lastHit: Date.now(), ready: startHls(sid, entry, query).catch(() => null) };
         hlsSessions.set(sid, session);
       }
     }
