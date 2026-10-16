@@ -712,7 +712,7 @@ export function createParlorHandler(options = {}) {
     // Updates: the Electron shell does the work (it knows where the program lives).
     if (url.pathname === "/api/update") {
       if (!options.update) return sendJson(res, 200, { supported: false, available: false, current: "", latest: null });
-      return sendJson(res, 200, await options.update.check());
+      return sendJson(res, 200, await options.update.check(url.searchParams.get("fresh") === "1"));
     }
     if (url.pathname === "/api/update/install" && req.method === "POST") {
       if (!options.update) return sendJson(res, 400, { error: "Not available here." });

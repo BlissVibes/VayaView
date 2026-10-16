@@ -7,7 +7,9 @@ import path from "node:path";
 import { packager } from "@electron/packager";
 
 const keep = ["electron", "server", "dist-web", "package.json"];
-const target = path.resolve("VayaView");
+// --staging builds into releases\VayaView without touching the installed copy (it may be open).
+const staged = process.argv.includes("--staging");
+const target = staged ? path.resolve("releases", "VayaView") : path.resolve("VayaView");
 
 // Windows remembers an icon by the file it came from. Naming the icon file after its own
 // contents means a new picture is a new file name, so Windows has nothing stale to show.
@@ -33,7 +35,7 @@ const [built] = await packager({
 
 // One copy of the program, always in the same place: the new build replaces the old one,
 // and every older build (from when it was called Parlor) is removed.
-for (const old of [target, path.resolve("app"), path.resolve("release")]) fs.rmSync(old, { recursive: true, force: true });
+for (const old of staged ? [target] : [target, path.resolve("app"), path.resolve("release")]) fs.rmSync(old, { recursive: true, force: true });
 fs.cpSync(built, target, { recursive: true });
 fs.rmSync(staging, { recursive: true, force: true });
 console.log(`Packaged: ${path.join(target, "VayaView.exe")} (icon ${iconName})`);

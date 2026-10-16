@@ -117,12 +117,25 @@ function newer(candidate, current) {
   return false;
 }
 
-async function latestRelease() {
+/**
+ * GitHub allows 60 unsigned requests an hour from one internet connection, so the answer is
+ * kept for ten minutes. Progress while updating comes from here, never from GitHub.
+ */
+let releaseCache = { at: 0, value: null };
+async function latestRelease(fresh = false) {
+  if (!fresh && Date.now() - releaseCache.at < 10 * 60_000) return releaseCache.value;
+  const value = await fetchRelease();
+  releaseCache = { at: Date.now(), value };
+  return value;
+}
+
+async function fetchRelease() {
   const response = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
     headers: { "User-Agent": "VayaView", Accept: "application/vnd.github+json" },
     signal: AbortSignal.timeout(15_000),
   });
   if (response.status === 404) return null;
+  if (response.status === 403 || response.status === 429) throw new Error("GitHub is limiting checks for a while; try again within the hour");
   if (!response.ok) throw new Error(`GitHub answered ${response.status}`);
   const release = await response.json();
   return {
@@ -132,10 +145,12 @@ async function latestRelease() {
   };
 }
 
-async function checkUpdate() {
+async function checkUpdate(fresh = false) {
   const current = app.getVersion();
+  // While downloading or installing, report progress without asking GitHub anything.
+  if (update.phase !== "idle") return { supported: app.isPackaged, current, latest: releaseCache.value?.version ?? null, available: true, phase: update.phase, progress: update.progress, error: update.error };
   try {
-    const release = await latestRelease();
+    const release = await latestRelease(fresh);
     return {
       supported: app.isPackaged,
       current,
@@ -155,7 +170,7 @@ async function installUpdate() {
   if (!app.isPackaged || update.phase !== "idle") return;
   Object.assign(update, { phase: "downloading", progress: 0, error: null });
   try {
-    const release = await latestRelease();
+    const release = await latestRelease(true);
     if (!release?.asset || !newer(release.version, app.getVersion())) throw new Error("No newer version to install.");
     const work = path.join(DATA_DIR, "temp-update");
     fs.rmSync(work, { recursive: true, force: true });

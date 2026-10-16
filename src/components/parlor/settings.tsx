@@ -77,10 +77,10 @@ function Updates() {
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function check() {
+  async function check(fresh = false) {
     setBusy(true);
     try {
-      setStatus((await (await fetch("/api/update")).json()) as UpdateStatus);
+      setStatus((await (await fetch(`/api/update${fresh ? "?fresh=1" : ""}`)).json()) as UpdateStatus);
     } catch {
       setStatus(null);
     }
@@ -128,7 +128,7 @@ function Updates() {
             Update to {status.latest}
           </button>
         ) : null}
-        <button type="button" className={button} disabled={busy} onClick={check}>
+        <button type="button" className={button} disabled={busy} onClick={() => check(true)}>
           Check again
         </button>
       </div>
