@@ -101,6 +101,17 @@ export function Picture(props: PictureProps) {
     }
     let cancelled = false;
     const start = offsetRef.current / 1000;
+    // Removed when this stream is replaced, so a late one can never seek the next stream (an ffmpeg
+    // stream that is seeked starts over, at the cost of a second encode).
+    const onLoaded: Array<() => void> = [];
+    const whenLoaded = (fn: () => void) => {
+      const once = () => {
+        video.removeEventListener("loadedmetadata", once);
+        if (!cancelled) fn();
+      };
+      onLoaded.push(once);
+      video.addEventListener("loadedmetadata", once);
+    };
     const begin = (src: string, base: number) => {
       if (cancelled) return;
       baseRef.current = base;
@@ -109,14 +120,10 @@ export function Picture(props: PictureProps) {
       if (isRemote) {
         // A stream starts on the keyframe at or before the moment asked for. Skip ahead to the clock,
         // so the phone is not seconds behind the PC.
-        video.addEventListener(
-          "loadedmetadata",
-          () => {
-            const ahead = offsetRef.current / 1000 - baseRef.current;
-            if (ahead > 0.5) video.currentTime = ahead;
-          },
-          { once: true },
-        );
+        whenLoaded(() => {
+          const ahead = offsetRef.current / 1000 - baseRef.current;
+          if (ahead > 0.5) video.currentTime = ahead;
+        });
       }
       video.play().catch(() => {
         // Sound refused before the first click. Start silent instead of black.
@@ -126,7 +133,7 @@ export function Picture(props: PictureProps) {
       });
     };
     if (level === 0) {
-      video.addEventListener("loadedmetadata", () => (video.currentTime = offsetRef.current / 1000), { once: true });
+      whenLoaded(() => (video.currentTime = offsetRef.current / 1000));
       begin(`/media/${mediaId}`, 0);
     } else if (level === 1) {
       // A copied picture can only start on a keyframe. Ask which one, so subtitles and the clock stay honest.
@@ -144,6 +151,7 @@ export function Picture(props: PictureProps) {
     }
     return () => {
       cancelled = true;
+      for (const once of onLoaded) video.removeEventListener("loadedmetadata", once);
     };
   }, [playKey, mediaId, level, audio, burn, reload]);
 
