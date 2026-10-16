@@ -8,6 +8,7 @@ import type { PlayRequest } from "@/lib/player/seam";
 import { streamCues, type Cue } from "@/lib/player/subs";
 import type { Airing, Channel } from "@/lib/schedule/types";
 import type { Film, SubTrack } from "@/lib/library/types";
+import { LiftFilter, videoFilter, type Adjust } from "./picture-adjust";
 
 type PictureProps = {
   powered: boolean;
@@ -20,6 +21,8 @@ type PictureProps = {
   /** Position of the chosen sound track among the file's audio streams. */
   audio: number;
   sub: SubTrack | null;
+  /** This film's own black level, brightness and contrast. Absent or neutral: the picture as it is. */
+  adjust?: Adjust;
   /** Small picture inside the guide. The guide shows the title, so the card stays off. */
   compact: boolean;
   /** Controls shown with the title card in full view. */
@@ -55,7 +58,7 @@ function streamUrl(mediaId: string, query: string): string {
 type Level = 0 | 1 | 2;
 
 export function Picture(props: PictureProps) {
-  const { powered, channel, airing, film, request, digits, notice, audio, sub, compact, toolbar, footer, seekToken, onToggleView, className } = props;
+  const { powered, channel, airing, film, request, digits, notice, audio, sub, adjust, compact, toolbar, footer, seekToken, onToggleView, className } = props;
   const station = channel ? formatStation(channel.number) : "--";
   const missing = request?.status === "missing";
 
@@ -283,6 +286,7 @@ export function Picture(props: PictureProps) {
   const live = mediaId != null && !failed;
   const showing = powered && !digits && airing != null && film != null && !missing && !failed;
   const hideCard = live && !digits && !notice && (compact || !card);
+  const filter = adjust ? videoFilter(adjust) : undefined;
 
   return (
     <div
@@ -297,11 +301,19 @@ export function Picture(props: PictureProps) {
       onDoubleClick={onToggleView}
       className={cn("group relative h-full w-full overflow-hidden bg-screen text-cream [container-type:inline-size]", hideCard && !compact ? "cursor-none" : "", className)}
     >
+      {/* With a filter on, the black bars sit behind the video instead of in it, so they stay black. */}
+      {filter ? (
+        <>
+          <LiftFilter lift={adjust?.lift ?? 0} />
+          <div className={cn("absolute inset-0 bg-black", live ? "" : "hidden")} />
+        </>
+      ) : null}
       <video
         ref={videoRef}
         playsInline
         onTimeUpdate={onTime}
-        className={cn("absolute inset-0 h-full w-full bg-black object-contain", live ? "" : "hidden")}
+        className={cn("absolute inset-0 h-full w-full object-contain", filter ? "" : "bg-black", live ? "" : "hidden")}
+        style={filter ? { filter } : undefined}
         onError={() => {
           if (!playKey) return;
           // A stream being replaced can still report a failure after the new one has started. Ignore it.

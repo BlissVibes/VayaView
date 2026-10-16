@@ -13,6 +13,7 @@ import { SeekBar } from "./seek-bar";
 import { StationMenu } from "./station-menu";
 import { Settings } from "./settings";
 import { TrackMenu, useTracks } from "./tracks";
+import { PictureMenu, usePictureAdjust } from "./picture-adjust";
 import { scheduleLibrary, useParlor } from "./use-parlor";
 import { durable } from "@/lib/durable";
 
@@ -100,6 +101,7 @@ export function ParlorApp() {
   }
   const request = airing ? playRequestFor(airing, film) : null;
   const tracks = useTracks(film);
+  const picture = usePictureAdjust(film);
 
   useEffect(() => {
     if (held && !shifted && now != null) setHeld(null);
@@ -271,6 +273,7 @@ export function ParlorApp() {
             notice={parlor.notice}
             audio={tracks.audio}
             sub={tracks.sub}
+            adjust={isRemote ? undefined : picture.value}
             compact={!full}
             seekToken={seekToken}
             onToggleView={toggleView}
@@ -327,6 +330,7 @@ export function ParlorApp() {
             ) : null}
 
             <TrackMenu tracks={tracks} className="mt-4 flex flex-col gap-2" />
+            {isRemote ? null : <PictureMenu picture={picture} className="mt-2" />}
 
             <div className="mt-auto pt-4">
               <div className="mt-2 flex flex-wrap items-center gap-2">
