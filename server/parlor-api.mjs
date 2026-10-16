@@ -776,8 +776,10 @@ export function createParlorHandler(options = {}) {
     const args = copy
       ? ["-v", "error", "-noaccurate_seek", "-ss", (t + 0.14).toFixed(3)]
       : ["-v", "error", "-ss", t.toFixed(3)];
-    // Read about as fast as it is watched, after a head start, so a whole film is never copied to disk at once.
-    args.push("-readrate", "1.5", "-readrate_initial_burst", "40", "-i", entry.file);
+    // Read as fast as it is watched, after a 40 s head start, so a whole film is never copied to disk at once.
+    // Not faster: the playlist only keeps the last three minutes, and a stream that ran further and further
+    // ahead would delete the piece the phone is still playing.
+    args.push("-readrate", "1", "-readrate_initial_burst", "40", "-i", entry.file);
     if (burn != null) args.push("-filter_complex", `[0:v:0][0:s:${burn}]overlay,scale=-2:'min(1080,ih)'[v]`, "-map", "[v]");
     else args.push("-map", "0:v:0");
     args.push("-map", `0:a:${audio}?`, "-sn");
@@ -788,7 +790,8 @@ export function createParlorHandler(options = {}) {
     }
     args.push(
       "-c:a", "aac", "-ac", "2", "-b:a", "192k",
-      "-f", "hls", "-hls_time", "2", "-hls_list_size", "0", "-hls_playlist_type", "event",
+      // A sliding window of 90 two-second pieces (three minutes); older pieces are deleted, so the folder stays small.
+      "-f", "hls", "-hls_time", "2", "-hls_list_size", "90", "-hls_flags", "delete_segments+independent_segments",
       "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
       "-hls_segment_filename", "seg%05d.m4s", "index.m3u8",
     );
