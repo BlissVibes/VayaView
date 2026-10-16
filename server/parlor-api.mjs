@@ -324,6 +324,8 @@ export function createParlorHandler(options = {}) {
   }
 
   function run(command, args, res) {
+    // The viewer may have left while the encoder was being chosen. Start nothing for nobody.
+    if (res.destroyed) return;
     const child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
     children.add(child);
     child.stdout.pipe(res);
@@ -794,10 +796,13 @@ export function createParlorHandler(options = {}) {
     const session = hlsSessions.get(sid);
     if (!session) return;
     hlsSessions.delete(sid);
-    // Wait for ffmpeg to actually stop before removing what it was writing.
-    if (session.child.exitCode == null) session.child.once("exit", () => clearDir(session.dir));
-    else clearDir(session.dir);
-    session.child.kill();
+    void session.ready.then((stream) => {
+      if (!stream) return;
+      // Wait for ffmpeg to actually stop before removing what it was writing.
+      if (stream.child.exitCode == null && stream.child.signalCode == null) stream.child.once("exit", () => clearDir(stream.dir));
+      else clearDir(stream.dir);
+      stream.child.kill();
+    });
   }
   // A phone that stops asking for pieces has gone. Its session goes too.
   setInterval(() => {
@@ -837,8 +842,9 @@ export function createParlorHandler(options = {}) {
     // Run inside the session folder: ffmpeg puts the init piece in its working folder, whatever the playlist path says.
     const child = spawn(FFMPEG, args, { cwd: dir, stdio: ["ignore", "ignore", "ignore"], windowsHide: true });
     children.add(child);
+    child.on("error", () => children.delete(child));
     child.on("exit", () => children.delete(child));
-    return { dir, child, lastHit: Date.now() };
+    return { dir, child };
   }
 
   async function sendHls(req, res, part, query) {
@@ -857,7 +863,8 @@ export function createParlorHandler(options = {}) {
         // The same phone moved on: let its previous stream finish its last requests, then stop it.
         const phone = sid.split("-")[0];
         for (const other of hlsSessions.keys()) if (other !== sid && other.split("-")[0] === phone) setTimeout(() => endHls(other), 5000);
-        session = { ...(await startHls(sid, entry, query)), key };
+        // Recorded before ffmpeg starts, so a second request for the same playlist joins this stream instead of starting another.
+        session = { key, lastHit: Date.now(), ready: startHls(sid, entry, query).catch(() => null) };
         hlsSessions.set(sid, session);
       }
     }
@@ -866,7 +873,12 @@ export function createParlorHandler(options = {}) {
       return res.end();
     }
     session.lastHit = Date.now();
-    const target = path.join(session.dir, file);
+    const stream = await session.ready;
+    if (!stream) {
+      res.statusCode = 404;
+      return res.end();
+    }
+    const target = path.join(stream.dir, file);
     // The first pieces take a moment to appear.
     for (let i = 0; i < 75; i++) {
       if (fs.existsSync(target) && (file !== "index.m3u8" || /#EXTINF/.test(fs.readFileSync(target, "utf8")))) break;
