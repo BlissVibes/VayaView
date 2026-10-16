@@ -26,13 +26,21 @@ function parseBlock(block: string, shift: number): Cue | null {
 }
 
 /**
+ * "whole": every line from `shift` on came. "partial": only the next stretch came, while the server
+ * copies the whole track once. "waiting": that copy is not ready yet. "none": no subtitles.
+ */
+export type CueResult = "whole" | "partial" | "waiting" | "none";
+
+/**
  * Reads WebVTT as it arrives, so lines show up before ffmpeg has finished
  * walking the file. `shift` is where in the film the extraction began.
  */
-export async function streamCues(url: string, shift: number, signal: AbortSignal, onCue: (cue: Cue) => void): Promise<void> {
+export async function streamCues(url: string, shift: number, signal: AbortSignal, onCue: (cue: Cue) => void): Promise<CueResult> {
   try {
     const response = await fetch(url, { signal });
-    if (!response.ok || !response.body) return;
+    if (response.status === 204) return "waiting";
+    if (!response.ok || !response.body) return "none";
+    const result: CueResult = response.headers.get("X-Subs") === "partial" ? "partial" : "whole";
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
     let buffer = "";
     for (;;) {
@@ -48,10 +56,11 @@ export async function streamCues(url: string, shift: number, signal: AbortSignal
       if (done) {
         const cue = parseBlock(buffer, shift);
         if (cue) onCue(cue);
-        return;
+        return result;
       }
     }
   } catch {
     // Aborted on a channel change, or the track would not convert. No subtitles, no crash.
+    return "none";
   }
 }

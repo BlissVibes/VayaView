@@ -8,7 +8,7 @@
  *   GET  /api/keyframe/:id?t=    keyframe at or before t, so a copy session knows where it began
  *   GET  /media/:id              the file itself, with Range (direct play)
  *   GET  /media/:id?t=&a=&v=     one ffmpeg session from that offset. Dies when the viewer leaves.
- *   GET  /subs/:id?s=&t=         one subtitle track as WebVTT, streamed from that offset
+ *   GET  /subs/:id?s=&t=         one subtitle track as WebVTT from that offset (copied out of the film once, then cached)
  *
  * Schedule math is not in here. See src/lib/schedule/engine.ts.
  */
@@ -378,19 +378,151 @@ export function createParlorHandler(options = {}) {
     run(FFMPEG, args, res);
   }
 
-  function sendSubs(res, entry, query) {
+  // Each text subtitle track is copied out of its film once, into Data\subs-cache, and every later
+  // tune or scrub is served from that small file instead of reading the film again.
+  const subsDir = path.join(dataDir, "subs-cache");
+  fs.mkdirSync(subsDir, { recursive: true });
+  const SUBS_CACHE_BYTES = 200 * 1024 * 1024;
+  /** Tracks ffmpeg could not convert this run. They are streamed the old way. */
+  const subsFailed = new Set();
+  /** One copy at a time, plus the latest one asked for. Flipping through channels never queues up a pile. */
+  let subsRunning = null;
+  let subsNext = null;
+
+  function extractSubs(job) {
+    if (subsRunning === job.name || subsNext?.name === job.name || fs.existsSync(path.join(subsDir, job.name))) return;
+    if (subsRunning) {
+      subsNext = job;
+      return;
+    }
+    subsRunning = job.name;
+    const file = path.join(subsDir, job.name);
+    const tmp = `${file}.tmp`;
+    const child = spawn(FFMPEG, ["-v", "error", "-y", "-i", job.source, ...job.map, "-f", "webvtt", tmp], { stdio: "ignore", windowsHide: true });
+    children.add(child);
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      children.delete(child);
+      try {
+        if (ok) {
+          // An older copy of the same track (the film was replaced since) goes.
+          const prefix = job.name.replace(/[^-]+\.vtt$/, "");
+          for (const name of fs.readdirSync(subsDir)) if (name.startsWith(prefix) && name.endsWith(".vtt")) fs.rmSync(path.join(subsDir, name), { force: true });
+          fs.renameSync(tmp, file);
+          trimSubsCache();
+        } else {
+          subsFailed.add(job.name);
+          fs.rmSync(tmp, { force: true });
+        }
+      } catch {
+        // A copy that could not be saved is made again next time.
+      }
+      subsRunning = null;
+      const next = subsNext;
+      subsNext = null;
+      if (next) extractSubs(next);
+    };
+    child.on("error", () => finish(false));
+    child.on("exit", (code) => finish(code === 0));
+  }
+
+  /** Keep the copies under 200 MB, least recently watched dropped first. */
+  function trimSubsCache() {
+    const files = fs
+      .readdirSync(subsDir)
+      .filter((name) => name.endsWith(".vtt"))
+      .map((name) => {
+        const stat = fs.statSync(path.join(subsDir, name));
+        return { name, size: stat.size, at: stat.mtimeMs };
+      })
+      .sort((a, b) => a.at - b.at);
+    let total = files.reduce((sum, item) => sum + item.size, 0);
+    for (const item of files) {
+      if (total <= SUBS_CACHE_BYTES) break;
+      fs.rmSync(path.join(subsDir, item.name), { force: true });
+      total -= item.size;
+    }
+  }
+
+  const vttStamp = (value) => value.trim().split(":").reduce((sum, part) => sum * 60 + Number(part), 0);
+  const vttTime = (seconds) => {
+    const ms = Math.round(seconds * 1000);
+    const two = (n) => String(n).padStart(2, "0");
+    return `${two(Math.floor(ms / 3_600_000))}:${two(Math.floor(ms / 60_000) % 60)}:${two(Math.floor(ms / 1000) % 60)}.${String(ms % 1000).padStart(3, "0")}`;
+  };
+
+  /** The lines still to come after t, timed from t, as a stream started at t would have sent them. */
+  function cuesFrom(vtt, t) {
+    const out = ["WEBVTT", ""];
+    for (const block of vtt.replace(/\r/g, "").split(/\n{2,}/)) {
+      const lines = block.split("\n");
+      const at = lines.findIndex((line) => line.includes("-->"));
+      if (at < 0) continue;
+      const [from, rest = ""] = lines[at].split("-->");
+      const start = vttStamp(from);
+      const end = vttStamp(rest.trim().split(/\s+/)[0] ?? "");
+      if (!(end > t) || !Number.isFinite(start)) continue;
+      out.push(`${vttTime(Math.max(0, start - t))} --> ${vttTime(end - t)}`, ...lines.slice(at + 1), "");
+    }
+    return `${out.join("\n")}\n`;
+  }
+
+  /**
+   * One subtitle track as WebVTT from t. From the copy when there is one. Until then, the next 20
+   * minutes are streamed straight from the film (marked partial) while the copy is made, and
+   * ?cached=1 asks for the copy only, answering 204 while it is not ready.
+   */
+  function sendSubs(res, id, entry, query) {
     const key = query.get("s") ?? "";
     const t = Math.max(0, Number(query.get("t")) || 0);
     const external = key.startsWith("x");
     const source = external ? entry.sidecars[Number(key.slice(1))] : entry.file;
-    if (!source) {
+    let mtime = 0;
+    try {
+      mtime = Math.round(fs.statSync(source).mtimeMs);
+    } catch {
       res.statusCode = 404;
       return res.end();
     }
-    const map = external ? [] : ["-map", `0:s:${Math.max(0, parseInt(key, 10) || 0)}`];
+    const track = external ? key : String(Math.max(0, parseInt(key, 10) || 0));
+    const map = external ? [] : ["-map", `0:s:${track}`];
+    const name = `${id}-${track}-${mtime}.vtt`;
+    const file = path.join(subsDir, name);
+    const cached = query.get("cached") === "1";
+    if (fs.existsSync(file)) {
+      let text;
+      try {
+        text = fs.readFileSync(file, "utf8");
+        const now = new Date();
+        fs.utimes(file, now, now, () => {});
+      } catch {
+        res.statusCode = 404;
+        return res.end();
+      }
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "text/vtt; charset=utf-8");
+      return res.end(cuesFrom(text, t));
+    }
+    if (subsFailed.has(name)) {
+      if (cached) {
+        res.statusCode = 404;
+        return res.end();
+      }
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "text/vtt; charset=utf-8");
+      return run(FFMPEG, ["-v", "error", "-ss", String(t), "-i", source, ...map, "-f", "webvtt", "pipe:1"], res);
+    }
+    extractSubs({ name, source, map });
+    if (cached) {
+      res.statusCode = 204;
+      return res.end();
+    }
     res.statusCode = 200;
     res.setHeader("Content-Type", "text/vtt; charset=utf-8");
-    run(FFMPEG, ["-v", "error", "-ss", String(t), "-i", source, ...map, "-f", "webvtt", "pipe:1"], res);
+    res.setHeader("X-Subs", "partial");
+    run(FFMPEG, ["-v", "error", "-ss", String(t), "-t", "1200", "-i", source, ...map, "-f", "webvtt", "pipe:1"], res);
   }
 
   function sendKeyframe(res, entry, t) {
@@ -1157,7 +1289,7 @@ export function createParlorHandler(options = {}) {
         res.statusCode = 404;
         return res.end();
       }
-      if (part[1] === "subs") return sendSubs(res, entry, url.searchParams);
+      if (part[1] === "subs") return sendSubs(res, part[part.length - 1], entry, url.searchParams);
       if (part[1] === "api") return sendKeyframe(res, entry, Math.max(0, Number(url.searchParams.get("t")) || 0));
       if (url.searchParams.get("t") != null) return sendSession(res, entry, url.searchParams);
       return sendDirect(req, res, entry);

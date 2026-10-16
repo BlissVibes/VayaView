@@ -180,7 +180,9 @@ export function Picture(props: PictureProps) {
     else setReload((value) => value + 1);
   }, [seekToken, playKey, level]);
 
-  // Text subtitles: one extraction from just before now, drawn here, not by the browser.
+  // Text subtitles: the lines from just before now, drawn here, not by the browser. The first time a
+  // track is asked for, the server sends the next stretch while it copies the whole track once; the
+  // copy is fetched as soon as it is ready.
   const textSub = sub?.text ? sub.key : null;
   useEffect(() => {
     cuesRef.current = [];
@@ -188,7 +190,22 @@ export function Picture(props: PictureProps) {
     if (!mediaId || textSub == null) return;
     const from = Math.max(0, offsetRef.current / 1000 - 15);
     const control = new AbortController();
-    void streamCues(`/subs/${mediaId}?s=${textSub}&t=${from.toFixed(1)}`, from, control.signal, (cue) => cuesRef.current.push(cue));
+    const url = `/subs/${mediaId}?s=${textSub}&t=${from.toFixed(1)}`;
+    const pause = (ms: number) =>
+      new Promise<void>((resolve) => {
+        const timer = window.setTimeout(resolve, ms);
+        control.signal.addEventListener("abort", () => (window.clearTimeout(timer), resolve()), { once: true });
+      });
+    void (async () => {
+      let result = await streamCues(url, from, control.signal, (cue) => cuesRef.current.push(cue));
+      for (let tries = 0; (result === "partial" || result === "waiting") && tries < 120; tries++) {
+        await pause(10_000);
+        if (control.signal.aborted) return;
+        const fresh: Cue[] = [];
+        result = await streamCues(`${url}&cached=1`, from, control.signal, (cue) => fresh.push(cue));
+        if (result === "whole" && !control.signal.aborted) cuesRef.current = fresh;
+      }
+    })();
     return () => control.abort();
   }, [tuneKey, mediaId, textSub, seekToken]);
 
