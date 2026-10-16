@@ -263,6 +263,8 @@ export const diskMissingIds = new Set<string>();
 export const libraryInfo = {
   folders: [] as string[],
   ffprobe: true,
+  /** The system the app runs on ("win32", "darwin"), so help text can name the right steps. */
+  platform: "",
   error: null as string | null,
   /** Every film and show as TMDB will be asked about it. Filled when the library loads. */
   metaItems: [] as { key: string; kind: "movie" | "tv"; title: string; year: number | string }[],

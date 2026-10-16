@@ -26,9 +26,36 @@ const DIRECT_VIDEO = new Set(["h264", "vp8", "vp9", "av1"]);
 const DIRECT_AUDIO = new Set(["aac", "mp3", "opus", "vorbis", "flac"]);
 const TEXT_SUBS = new Set(["subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"]);
 const MIME = { ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/mp4", ".webm": "video/webm", ".mkv": "video/webm" };
-const DEFAULT_FOLDER = "G:\\MOVIES";
+/** The library on the PC this was made for. Elsewhere there is none until one is picked. */
+const DEFAULT_FOLDER = process.platform === "win32" ? "G:\\MOVIES" : null;
 /** Bump when the probe stores something new, so old entries are measured again. */
 const CACHE_VERSION = 3;
+
+/**
+ * Where ffmpeg and ffprobe are. A Mac app opened from Finder does not get the Terminal's PATH,
+ * so Homebrew's folders are tried by name. On Windows the bare name has always worked.
+ */
+function findTool(name) {
+  if (process.platform === "win32") return name;
+  const dirs = [...(process.env.PATH ?? "").split(path.delimiter), "/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"];
+  for (const dir of dirs) {
+    const file = dir && path.join(dir, name);
+    try {
+      if (file) {
+        fs.accessSync(file, fs.constants.X_OK);
+        return file;
+      }
+    } catch {
+      // Not here.
+    }
+  }
+  return name;
+}
+const FFMPEG = findTool("ffmpeg");
+const FFPROBE = findTool("ffprobe");
+
+/** "~/Movies" means the home folder's Movies, as it does in a Mac or Linux shell. */
+const expandHome = (dir) => (dir === "~" || dir.startsWith("~/") ? path.join(os.homedir(), dir.slice(1)) : dir);
 
 export function createParlorHandler(options = {}) {
   // Everything VayaView keeps lives in one Data folder beside the program (D:\SelfTV\Data). Not in
@@ -64,7 +91,7 @@ export function createParlorHandler(options = {}) {
   function folders() {
     const config = readJson(configFile, null);
     if (config && Array.isArray(config.folders)) return config.folders.filter((item) => typeof item === "string");
-    return fs.existsSync(DEFAULT_FOLDER) ? [DEFAULT_FOLDER] : [];
+    return DEFAULT_FOLDER && fs.existsSync(DEFAULT_FOLDER) ? [DEFAULT_FOLDER] : [];
   }
 
   /** Collects videos, and the subtitle files sitting in each folder. */
@@ -89,7 +116,7 @@ export function createParlorHandler(options = {}) {
   function probe(file) {
     return new Promise((resolve) => {
       execFile(
-        "ffprobe",
+        FFPROBE,
         ["-v", "error", "-show_entries", "format=duration:stream=codec_type,codec_name,channels,width,height:stream_tags=language,title", "-of", "json", file],
         { timeout: 45_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
         (error, stdout) => {
@@ -228,21 +255,37 @@ export function createParlorHandler(options = {}) {
     films.sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true }));
     fs.writeFileSync(cacheFile, JSON.stringify({ version: CACHE_VERSION, files: cache }));
     status.phase = "idle";
-    return { folders: roots, films, ffprobe: ffprobeOk };
+    return { folders: roots, films, ffprobe: ffprobeOk, platform: process.platform };
   }
 
-  /** Hardware encoder when the machine really has one. Tested once. No B-frames, so picture and sound both start at zero. */
-  function encoder() {
-    encoderArgs ??= new Promise((resolve) => {
+  /** True when ffmpeg can really encode with these settings on this machine. */
+  const works = (args) =>
+    new Promise((resolve) =>
+      execFile(FFMPEG, ["-v", "error", "-f", "lavfi", "-i", "color=s=256x256:d=0.2", ...args, "-f", "null", "-"], { timeout: 10_000, windowsHide: true }, (error) => resolve(!error)),
+    );
+
+  /**
+   * Hardware encoder when the machine really has one. Tested once per kind. No B-frames, so picture
+   * and sound both start at zero. NVIDIA on the PC; on a Mac, Apple's own (VideoToolbox), and for
+   * the iPhone stream HEVC, which the phone plays natively at half the size.
+   */
+  function encoder(kind = "file") {
+    encoderArgs ??= new Map();
+    if (!encoderArgs.has(kind)) {
       const nvenc = ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "23", "-b:v", "0", "-bf", "0", "-pix_fmt", "yuv420p"];
-      execFile(
-        "ffmpeg",
-        ["-v", "error", "-f", "lavfi", "-i", "color=s=256x256:d=0.2", ...nvenc, "-f", "null", "-"],
-        { timeout: 10_000, windowsHide: true },
-        (error) => resolve(error ? ["-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-bf", "0", "-pix_fmt", "yuv420p"] : nvenc),
+      const vtH264 = ["-c:v", "h264_videotoolbox", "-b:v", "8M", "-maxrate", "12M", "-bufsize", "16M", "-realtime", "1", "-bf", "0", "-pix_fmt", "yuv420p"];
+      const vtHevc = ["-c:v", "hevc_videotoolbox", "-b:v", "5M", "-maxrate", "8M", "-bufsize", "10M", "-realtime", "1", "-bf", "0", "-tag:v", "hvc1", "-pix_fmt", "yuv420p"];
+      const x264 = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-bf", "0", "-pix_fmt", "yuv420p"];
+      const tries = process.platform === "darwin" ? (kind === "hls" ? [vtHevc, vtH264] : [vtH264]) : [nvenc];
+      encoderArgs.set(
+        kind,
+        (async () => {
+          for (const args of tries) if (await works(args)) return args;
+          return x264;
+        })(),
       );
-    });
-    return encoderArgs;
+    }
+    return encoderArgs.get(kind);
   }
 
   function run(command, args, res) {
@@ -332,7 +375,7 @@ export function createParlorHandler(options = {}) {
     args.push("-c:a", "aac", "-ac", "2", "-b:a", "192k", "-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "pipe:1");
     res.statusCode = 200;
     res.setHeader("Content-Type", "video/mp4");
-    run("ffmpeg", args, res);
+    run(FFMPEG, args, res);
   }
 
   function sendSubs(res, entry, query) {
@@ -347,12 +390,12 @@ export function createParlorHandler(options = {}) {
     const map = external ? [] : ["-map", `0:s:${Math.max(0, parseInt(key, 10) || 0)}`];
     res.statusCode = 200;
     res.setHeader("Content-Type", "text/vtt; charset=utf-8");
-    run("ffmpeg", ["-v", "error", "-ss", String(t), "-i", source, ...map, "-f", "webvtt", "pipe:1"], res);
+    run(FFMPEG, ["-v", "error", "-ss", String(t), "-i", source, ...map, "-f", "webvtt", "pipe:1"], res);
   }
 
   function sendKeyframe(res, entry, t) {
     execFile(
-      "ffprobe",
+      FFPROBE,
       ["-v", "error", "-select_streams", "v:0", "-read_intervals", `${Math.max(0, t - 20)}%${t}`, "-show_entries", "packet=pts_time,dts_time,flags", "-of", "csv=p=0", entry.file],
       { timeout: 8000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
       (error, stdout) => {
@@ -609,7 +652,7 @@ export function createParlorHandler(options = {}) {
     if (copy) args.push("-c:v", "copy", ...(entry.vcodec === "hevc" ? ["-tag:v", "hvc1"] : []));
     else {
       if (burn == null) args.push("-vf", "scale=-2:'min(1080,ih)'");
-      args.push(...(await encoder()), "-g", "96");
+      args.push(...(await encoder("hls")), "-g", "96");
     }
     args.push(
       "-c:a", "aac", "-ac", "2", "-b:a", "192k",
@@ -618,7 +661,7 @@ export function createParlorHandler(options = {}) {
       "-hls_segment_filename", "seg%05d.m4s", "index.m3u8",
     );
     // Run inside the session folder: ffmpeg puts the init piece in its working folder, whatever the playlist path says.
-    const child = spawn("ffmpeg", args, { cwd: dir, stdio: ["ignore", "ignore", "ignore"], windowsHide: true });
+    const child = spawn(FFMPEG, args, { cwd: dir, stdio: ["ignore", "ignore", "ignore"], windowsHide: true });
     children.add(child);
     child.on("exit", () => children.delete(child));
     return { dir, child, lastHit: Date.now() };
@@ -783,9 +826,17 @@ export function createParlorHandler(options = {}) {
       return sendEpisodes(res, url.searchParams.get("show") ?? "", url.searchParams.get("year") ?? "", url.searchParams.get("refresh") === "1");
     }
 
+    // The system's folder chooser, opened on the PC (the Electron shell owns it).
+    if (url.pathname === "/api/pick-folder" && req.method === "POST") {
+      if (!options.pickFolder) return sendJson(res, 200, { path: null, available: false });
+      const body = (await readBody(req)) ?? {};
+      const start = typeof body.from === "string" && body.from ? expandHome(body.from) : undefined;
+      return sendJson(res, 200, { path: await options.pickFolder(String(body.title ?? "Choose a folder"), start), available: true });
+    }
+
     if (url.pathname === "/api/config" && req.method === "POST") {
       const body = await readBody(req);
-      const wanted = Array.isArray(body?.folders) ? body.folders.map((item) => path.resolve(String(item))) : [];
+      const wanted = Array.isArray(body?.folders) ? body.folders.map((item) => path.resolve(expandHome(String(item)))) : [];
       const bad = wanted.filter((dir) => !fs.existsSync(dir) || !fs.statSync(dir).isDirectory());
       if (bad.length > 0) return sendJson(res, 400, { error: `Not a folder: ${bad.join(", ")}` });
       fs.writeFileSync(configFile, JSON.stringify({ folders: wanted }, null, 2));
@@ -837,7 +888,7 @@ export function createParlorHandler(options = {}) {
     const cookie = /(?:^|;\s*)parlor_phone=([a-f0-9]+)/.exec(req.headers.cookie ?? "")?.[1];
     if (!cookie || !config.tokens.includes(cookie)) return sendJson(res, 401, { error: "pair" });
     const pcOnly =
-      /^\/api\/(phone|config|tmdb\/token|tmdb\/lookup|pair|update)/.test(url.pathname) ||
+      /^\/api\/(phone|config|pick-folder|tmdb\/token|tmdb\/lookup|pair|update)/.test(url.pathname) ||
       (url.pathname === "/api/fonts" && req.method !== "GET") ||
       (url.pathname === "/api/store" && req.method !== "GET") ||
       (url.pathname === "/api/now" && req.method !== "GET");

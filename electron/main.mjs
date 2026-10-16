@@ -3,10 +3,12 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { app, BrowserWindow, Menu, shell } from "electron";
+import { app, BrowserWindow, dialog, Menu, shell } from "electron";
 import { createParlorHandler } from "../server/parlor-api.mjs";
 
 const NAME = "VayaView";
+const MAC = process.platform === "darwin";
+const WIN = process.platform === "win32";
 /** Windows groups taskbar buttons, and picks their icon, by this id. */
 const APP_ID = "VayaView.TV";
 /** Fixed, so the window always opens on the same page. Loopback only. */
@@ -21,14 +23,25 @@ const MIME = {
   ".woff2": "font/woff2",
 };
 
+/** On a Mac the program is VayaView.app/Contents/MacOS/VayaView; this is the VayaView.app folder. */
+const appBundle = () => path.resolve(process.execPath, "..", "..", "..");
+
 /**
  * Everything VayaView keeps (stations, backups, settings, library scan, even the window's own
- * cache) lives in one folder beside the program: D:\SelfTV\Data next to D:\SelfTV\VayaView.
+ * cache) lives in one folder. On Windows it is beside the program: D:\SelfTV\Data next to
+ * D:\SelfTV\VayaView. On a Mac a Data folder beside VayaView.app wins (a portable copy);
+ * otherwise it is the usual Mac place, ~/Library/Application Support/VayaView/Data.
  */
-const DATA_DIR = app.isPackaged ? path.resolve(path.dirname(process.execPath), "..", "Data") : path.join(process.cwd(), "Data");
+function dataDir() {
+  if (!app.isPackaged) return path.join(process.cwd(), "Data");
+  if (!MAC) return path.resolve(path.dirname(process.execPath), "..", "Data");
+  const beside = path.join(path.dirname(appBundle()), "Data");
+  return fs.existsSync(beside) ? beside : path.join(os.homedir(), "Library", "Application Support", NAME, "Data");
+}
+const DATA_DIR = dataDir();
 fs.mkdirSync(DATA_DIR, { recursive: true });
 app.setPath("userData", path.join(DATA_DIR, "app-cache"));
-app.setAppUserModelId(APP_ID);
+if (WIN) app.setAppUserModelId(APP_ID);
 
 // A background hiccup (a stream folder that would not delete, a dropped connection) must not
 // put an error box in front of the picture. It goes in a log in the Data folder instead.
@@ -103,10 +116,10 @@ function placeShortcuts() {
 }
 
 // ---------------------------------------------------------------- Updates
-// New versions are published as GitHub releases with one zip of the program. Installing one
-// replaces this copy where it stands (D:\SelfTV\VayaView), so there is only ever one VayaView.
+// New versions are published as GitHub releases with one zip of the program per system. Installing
+// one replaces this copy where it stands (D:\SelfTV\VayaView, or VayaView.app), so there is only ever one VayaView.
 const REPO = "CaptainSamus/VayaView";
-const ASSET = /^VayaView-win32-x64\.zip$/i;
+const ASSET = MAC ? new RegExp(`^VayaView-darwin-${process.arch}\\.zip$`, "i") : /^VayaView-win32-x64\.zip$/i;
 const update = { phase: "idle", progress: 0, error: null };
 
 /** "0.10.0" is newer than "0.9.2". */
@@ -191,6 +204,11 @@ async function installUpdate() {
     await new Promise((resolve, reject) => out.end((error) => (error ? reject(error) : resolve())));
 
     update.phase = "installing";
+    if (MAC) {
+      await finishMac(zip, work);
+      setTimeout(() => app.quit(), 500);
+      return;
+    }
     const unpacked = path.join(work, "new");
     await new Promise((resolve, reject) => {
       const child = spawn("powershell.exe", ["-NoProfile", "-Command", `Expand-Archive -LiteralPath '${zip}' -DestinationPath '${unpacked}' -Force`], { windowsHide: true });
@@ -226,12 +244,59 @@ async function installUpdate() {
   }
 }
 
+/**
+ * The Mac half of installing: unpack the new VayaView.app, then a small script waits for this one
+ * to close, puts the new app where the old one was (removing the old, so there is one copy), and
+ * opens it. If the swap fails, the old app is put back.
+ */
+async function finishMac(zip, work) {
+  const bundle = appBundle();
+  // A downloaded app that was never moved runs from a hidden, read-only copy and cannot be replaced.
+  if (bundle.includes("/AppTranslocation/")) throw new Error("Move VayaView into your Applications folder first, then update.");
+  const unpacked = path.join(work, "new");
+  await new Promise((resolve, reject) => {
+    const child = spawn("/usr/bin/ditto", ["-x", "-k", zip, unpacked]);
+    child.on("error", reject);
+    child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error("Could not unpack the update."))));
+  });
+  const fresh = path.join(unpacked, `${NAME}.app`);
+  if (!fs.existsSync(path.join(fresh, "Contents", "MacOS", NAME))) throw new Error("The update did not contain VayaView.app.");
+  const script = path.join(work, "finish-update.sh");
+  // Paths arrive as arguments, so no quoting can break them: $1 pid, $2 old app, $3 new app, $4 work folder.
+  fs.writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      'i=0; while kill -0 "$1" 2>/dev/null && [ $i -lt 240 ]; do sleep 0.5; i=$((i+1)); done',
+      'xattr -dr com.apple.quarantine "$3" 2>/dev/null',
+      'rm -rf "$2.old"',
+      'if mv "$2" "$2.old" && ditto "$3" "$2"; then rm -rf "$2.old"; else rm -rf "$2"; mv "$2.old" "$2"; fi',
+      'open "$2"',
+      'sleep 5; rm -rf "$4"',
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  spawn("/bin/sh", [script, String(process.pid), bundle, fresh, work], { detached: true, stdio: "ignore" }).unref();
+}
+
+/** The folder chooser, for the library and the downloads folder. PC only (see handler.remote). */
+async function pickFolder(win, title, defaultPath) {
+  const result = await dialog.showOpenDialog(win, { title, defaultPath, properties: ["openDirectory", "createDirectory"] });
+  return result.canceled ? null : (result.filePaths[0] ?? null);
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   let win = null;
   let phoneServer = null;
-  const api = createParlorHandler({ dataDir: DATA_DIR, onPhone: setPhone, update: { check: checkUpdate, install: installUpdate } });
+  const api = createParlorHandler({
+    dataDir: DATA_DIR,
+    onPhone: setPhone,
+    update: { check: checkUpdate, install: installUpdate },
+    pickFolder: (title, defaultPath) => pickFolder(win, title, defaultPath),
+  });
 
   /** Listen on the home network only while Phone access is on. Off means nothing is listening. */
   async function setPhone(enabled) {
@@ -256,7 +321,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(async () => {
-    if (app.isPackaged) {
+    if (app.isPackaged && WIN) {
       tidyOldCopies();
       try {
         placeShortcuts();
@@ -270,7 +335,8 @@ if (!app.requestSingleInstanceLock()) {
       server.listen(PORT, "127.0.0.1", resolve);
     });
     if (api.phoneEnabled()) await setPhone(true);
-    Menu.setApplicationMenu(null);
+    // Windows has no menu bar. A Mac always has one, and without Edit, Cmd+C/V do nothing in text boxes.
+    Menu.setApplicationMenu(MAC ? Menu.buildFromTemplate([{ role: "appMenu" }, { role: "editMenu" }, { role: "windowMenu" }]) : null);
     win = new BrowserWindow({
       width: 1440,
       height: 900,
@@ -283,7 +349,7 @@ if (!app.requestSingleInstanceLock()) {
     });
     win.on("closed", () => (win = null));
     // What a taskbar pin records: this id, this exe to relaunch, and this icon.
-    if (app.isPackaged) {
+    if (app.isPackaged && WIN) {
       win.setAppDetails({
         appId: APP_ID,
         appIconPath: iconFile(),

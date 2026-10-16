@@ -1,0 +1,46 @@
+# Builds the Mac app for each GitHub release and attaches it beside the Windows zip.
+# A Mac build cannot be made reliably on Windows (the app must be signed on a Mac, and its
+# framework uses symlinks), so GitHub's Mac runner does it. There is no Apple Developer account,
+# so the app is ad-hoc signed only: the first time, open it with right-click > Open.
+name: mac-release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach to (for example v0.2.2)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    runs-on: macos-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx vite build
+      - run: node scripts/package.mjs --mac
+      - name: Sign (ad-hoc) and zip
+        run: |
+          for arch in arm64 x64; do
+            app="releases/mac/VayaView-darwin-$arch/VayaView.app"
+            codesign --force --deep -s - "$app"
+            codesign --verify --deep "$app"
+            # ditto keeps the symlinks and permissions inside the app; a plain zip would break it.
+            ditto -c -k --sequesterRsrc --keepParent "$app" "releases/VayaView-darwin-$arch.zip"
+          done
+      - name: Attach to the release
+        run: gh release upload "$TAG" releases/VayaView-darwin-arm64.zip releases/VayaView-darwin-x64.zip --clobber

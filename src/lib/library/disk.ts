@@ -334,10 +334,11 @@ export async function loadDiskLibrary(): Promise<void> {
   libraryInfo.error = null;
   try {
     const response = await fetch("/api/library");
-    const data = (await response.json()) as { folders: string[]; films: DiskFile[]; ffprobe: boolean; error?: string };
+    const data = (await response.json()) as { folders: string[]; films: DiskFile[]; ffprobe: boolean; platform?: string; error?: string };
     if (data.error) throw new Error(data.error);
     libraryInfo.folders = data.folders;
     libraryInfo.ffprobe = data.ffprobe;
+    libraryInfo.platform = data.platform ?? "";
     if (data.films.length === 0) return;
     const missing = new Set(data.films.filter((file) => file.missing).map((file) => file.id));
     const films = buildLibrary(data.films);
