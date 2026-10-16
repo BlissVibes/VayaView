@@ -73,6 +73,8 @@ export function Picture(props: PictureProps) {
   const [reload, setReload] = useState(0);
   /** The stream this player was last told to play. An error from any older one is old news. */
   const srcRef = useRef("");
+  /** When the picture was last tuned, and to what, to notice fast flipping. */
+  const lastTune = useRef({ key: "" as string | null, at: 0 });
   const retries = useRef(0);
   const [muted, setMuted] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -100,7 +102,7 @@ export function Picture(props: PictureProps) {
       return;
     }
     let cancelled = false;
-    const start = offsetRef.current / 1000;
+    const control = new AbortController();
     // Removed when this stream is replaced, so a late one can never seek the next stream (an ffmpeg
     // stream that is seeked starts over, at the cost of a second encode).
     const onLoaded: Array<() => void> = [];
@@ -132,25 +134,37 @@ export function Picture(props: PictureProps) {
         video.play().catch(() => {});
       });
     };
-    if (level === 0) {
-      whenLoaded(() => (video.currentTime = offsetRef.current / 1000));
-      begin(`/media/${mediaId}`, 0);
-    } else if (level === 1) {
-      // A copied picture can only start on a keyframe. Ask which one, so subtitles and the clock stay honest.
-      // No keyframe nearby means no honest starting point, so that file is re-encoded instead.
-      fetch(`/api/keyframe/${mediaId}?t=${start.toFixed(2)}`)
-        .then((response) => response.json() as Promise<{ found: boolean; t: number; base: number }>)
-        .catch(() => null)
-        .then((body) => {
-          if (cancelled) return;
-          if (body?.found) begin(streamUrl(mediaId, `v=copy&a=${audio}&t=${body.t.toFixed(3)}`), body.base);
-          else setBump({ key: playKey, level: 2 });
-        });
-    } else {
-      begin(streamUrl(mediaId, `v=enc&a=${audio}&t=${start.toFixed(2)}${burn != null ? `&burn=${burn}` : ""}`), start);
-    }
+    const go = () => {
+      const start = offsetRef.current / 1000;
+      if (level === 0) {
+        whenLoaded(() => (video.currentTime = offsetRef.current / 1000));
+        begin(`/media/${mediaId}`, 0);
+      } else if (level === 1) {
+        // A copied picture can only start on a keyframe. Ask which one, so subtitles and the clock stay honest.
+        // No keyframe nearby means no honest starting point, so that file is re-encoded instead.
+        // A channel change cancels the question, and the server stops ffprobe.
+        fetch(`/api/keyframe/${mediaId}?t=${start.toFixed(2)}`, { signal: control.signal })
+          .then((response) => response.json() as Promise<{ found: boolean; t: number; base: number }>)
+          .catch(() => null)
+          .then((body) => {
+            if (cancelled) return;
+            if (body?.found) begin(streamUrl(mediaId, `v=copy&a=${audio}&t=${body.t.toFixed(3)}`), body.base);
+            else setBump({ key: playKey, level: 2 });
+          });
+      } else {
+        begin(streamUrl(mediaId, `v=enc&a=${audio}&t=${start.toFixed(2)}${burn != null ? `&burn=${burn}` : ""}`), start);
+      }
+    };
+    // Flipping through stations: a station passed within a moment of the last is opened only once the
+    // keys stop, so no stream is started for each one on the way.
+    const quick = lastTune.current.key !== playKey && Date.now() - lastTune.current.at < 400;
+    lastTune.current = { key: playKey, at: Date.now() };
+    const timer = quick ? window.setTimeout(go, 300) : null;
+    if (!quick) go();
     return () => {
       cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
+      control.abort();
       for (const once of onLoaded) video.removeEventListener("loadedmetadata", once);
     };
   }, [playKey, mediaId, level, audio, burn, reload]);

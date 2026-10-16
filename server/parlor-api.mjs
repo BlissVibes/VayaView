@@ -562,7 +562,8 @@ export function createParlorHandler(options = {}) {
   }
 
   function sendKeyframe(res, entry, t) {
-    execFile(
+    // Flipping past a station drops its question; ffprobe stops with it.
+    const child = execFile(
       FFPROBE,
       ["-v", "error", "-select_streams", "v:0", "-read_intervals", `${Math.max(0, t - 20)}%${t}`, "-show_entries", "packet=pts_time,dts_time,flags", "-of", "csv=p=0", entry.file],
       { timeout: 8000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
@@ -577,9 +578,10 @@ export function createParlorHandler(options = {}) {
           delay = Number.isFinite(Number(dts)) ? Math.max(0, value - Number(dts)) : 0;
         }
         // `base` is the film time at the first instant of the stream: the keyframe, less its decode delay.
-        sendJson(res, 200, { found: best != null, t: best ?? t, base: Math.max(0, (best ?? t) - delay) });
+        if (!res.destroyed) sendJson(res, 200, { found: best != null, t: best ?? t, base: Math.max(0, (best ?? t) - delay) });
       },
     );
+    res.on("close", () => child.kill());
   }
 
   /**
