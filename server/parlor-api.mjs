@@ -233,7 +233,7 @@ export function createParlorHandler(options = {}) {
       const first = entry.audio[0]?.codec;
       const direct = DIRECT_EXT.has(ext) && DIRECT_VIDEO.has(entry.vcodec) && (!first || DIRECT_AUDIO.has(first));
       const sidecars = missing ? [] : sidecarsFor(file, videosInDir, subsByDir);
-      index.set(id, { file, ext, vcodec: entry.vcodec, sidecars: sidecars.map((sub) => sub.file) });
+      index.set(id, { file, ext, vcodec: entry.vcodec, width: entry.width ?? 0, height: entry.height ?? 0, sidecars: sidecars.map((sub) => sub.file) });
       films.push({
         id,
         path: file,
@@ -264,28 +264,63 @@ export function createParlorHandler(options = {}) {
       execFile(FFMPEG, ["-v", "error", "-f", "lavfi", "-i", "color=s=256x256:d=0.2", ...args, "-f", "null", "-"], { timeout: 10_000, windowsHide: true }, (error) => resolve(!error)),
     );
 
+  /** A failed hardware test is tried again after this long: a GPU busy at start-up should not mean the slow way all day. */
+  const RETEST_MS = 3 * 60_000;
+
   /**
-   * Hardware encoder when the machine really has one. Tested once per kind. No B-frames, so picture
-   * and sound both start at zero. NVIDIA on the PC; on a Mac, Apple's own (VideoToolbox), and for
-   * the iPhone stream HEVC, which the phone plays natively at half the size.
+   * Hardware encoder when the machine really has one. Tested once per kind, or again a few minutes
+   * after a failure. No B-frames, so picture and sound both start at zero. NVIDIA on the PC; on a
+   * Mac, Apple's own (VideoToolbox), and for the iPhone stream HEVC, which the phone plays natively
+   * at half the size.
    */
   function encoder(kind = "file") {
     encoderArgs ??= new Map();
-    if (!encoderArgs.has(kind)) {
-      const nvenc = ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "23", "-b:v", "0", "-bf", "0", "-pix_fmt", "yuv420p"];
-      const vtH264 = ["-c:v", "h264_videotoolbox", "-b:v", "8M", "-maxrate", "12M", "-bufsize", "16M", "-realtime", "1", "-bf", "0", "-pix_fmt", "yuv420p"];
-      const vtHevc = ["-c:v", "hevc_videotoolbox", "-b:v", "5M", "-maxrate", "8M", "-bufsize", "10M", "-realtime", "1", "-bf", "0", "-tag:v", "hvc1", "-pix_fmt", "yuv420p"];
-      const x264 = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-bf", "0", "-pix_fmt", "yuv420p"];
-      const tries = process.platform === "darwin" ? (kind === "hls" ? [vtHevc, vtH264] : [vtH264]) : [nvenc];
-      encoderArgs.set(
-        kind,
-        (async () => {
-          for (const args of tries) if (await works(args)) return args;
-          return x264;
-        })(),
+    const tested = encoderArgs.get(kind);
+    if (tested && !(tested.fallback && Date.now() - tested.at > RETEST_MS)) return tested.args;
+    const nvenc = ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "23", "-b:v", "0", "-bf", "0", "-pix_fmt", "yuv420p"];
+    const vtH264 = ["-c:v", "h264_videotoolbox", "-b:v", "8M", "-maxrate", "12M", "-bufsize", "16M", "-realtime", "1", "-bf", "0", "-pix_fmt", "yuv420p"];
+    const vtHevc = ["-c:v", "hevc_videotoolbox", "-b:v", "5M", "-maxrate", "8M", "-bufsize", "10M", "-realtime", "1", "-bf", "0", "-tag:v", "hvc1", "-pix_fmt", "yuv420p"];
+    const x264 = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-bf", "0", "-pix_fmt", "yuv420p"];
+    const tries = process.platform === "darwin" ? (kind === "hls" ? [vtHevc, vtH264] : [vtH264]) : [nvenc];
+    const test = { at: Date.now(), fallback: false, args: null };
+    test.args = (async () => {
+      for (const args of tries) if (await works(args)) return args;
+      test.fallback = true;
+      return x264;
+    })();
+    encoderArgs.set(kind, test);
+    return test.args;
+  }
+
+  /**
+   * With NVENC, the NVIDIA card decodes too, so the processor no longer unpacks 4K HEVC frame by
+   * frame. ffmpeg falls back to the processor by itself for a format the card cannot decode.
+   */
+  let cudaTest = null;
+  async function decoder(encode) {
+    if (!encode.includes("h264_nvenc")) return [];
+    if (!cudaTest || (cudaTest.failed && Date.now() - cudaTest.at > RETEST_MS)) {
+      const test = { at: Date.now(), failed: false, ok: null };
+      test.ok = new Promise((resolve) =>
+        execFile(FFMPEG, ["-v", "error", "-init_hw_device", "cuda", "-f", "lavfi", "-i", "color=s=64x64:d=0.1", "-f", "null", "-"], { timeout: 10_000, windowsHide: true }, (error) => {
+          test.failed = Boolean(error);
+          resolve(!error);
+        }),
       );
+      cudaTest = test;
     }
-    return encoderArgs.get(kind);
+    return (await cudaTest.ok) ? ["-hwaccel", "cuda"] : [];
+  }
+
+  /**
+   * The picture, at most 1080 lines, with a picture-based subtitle burned in. The picture is made
+   * smaller first and the subtitle scaled by the same amount, so the overlay works on the small
+   * frame instead of the 4K one; it lands exactly where it did before.
+   */
+  function burnFilter(entry, burn) {
+    if (!entry.width || !entry.height || entry.height <= 1080) return `[0:v:0][0:s:${burn}]overlay,scale=-2:'min(1080,ih)'[v]`;
+    const factor = (1080 / entry.height).toFixed(6);
+    return `[0:v:0]scale=-2:1080[base];[0:s:${burn}]scale='trunc(iw*${factor}/2)*2':'trunc(ih*${factor}/2)*2'[sub];[base][sub]overlay[v]`;
   }
 
   function run(command, args, res) {
@@ -361,16 +396,17 @@ export function createParlorHandler(options = {}) {
     // A copied picture can only begin on a keyframe, so the sound must begin there too, not at the
     // exact second asked for. -noaccurate_seek does that. ffmpeg also seeks 3/23s early on files
     // with B-frames, so aim that far past the keyframe or it lands on the one before.
+    const encode = copy ? null : await encoder();
     const args = copy
       ? ["-v", "error", "-noaccurate_seek", "-ss", (t + 0.14).toFixed(3), "-i", entry.file]
-      : ["-v", "error", "-ss", t.toFixed(3), "-i", entry.file];
-    if (burn != null) args.push("-filter_complex", `[0:v:0][0:s:${burn}]overlay,scale=-2:'min(1080,ih)'[v]`, "-map", "[v]");
+      : ["-v", "error", ...(await decoder(encode)), "-ss", t.toFixed(3), "-i", entry.file];
+    if (burn != null) args.push("-filter_complex", burnFilter(entry, burn), "-map", "[v]");
     else args.push("-map", "0:v:0");
     args.push("-map", `0:a:${audio}?`, "-sn");
     if (copy) args.push("-c:v", "copy", ...(entry.vcodec === "hevc" ? ["-tag:v", "hvc1"] : []));
     else {
       if (burn == null) args.push("-vf", "scale=-2:'min(1080,ih)'");
-      args.push(...(await encoder()));
+      args.push(...encode);
     }
     args.push("-c:a", "aac", "-ac", "2", "-b:a", "192k", "-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "pipe:1");
     res.statusCode = 200;
@@ -773,20 +809,21 @@ export function createParlorHandler(options = {}) {
     const copy = query.get("v") === "copy" && burn == null;
     const dir = path.join(hlsRoot, `${sid}-${Date.now()}`);
     fs.mkdirSync(dir, { recursive: true });
+    const encode = copy ? null : await encoder("hls");
     const args = copy
       ? ["-v", "error", "-noaccurate_seek", "-ss", (t + 0.14).toFixed(3)]
-      : ["-v", "error", "-ss", t.toFixed(3)];
+      : ["-v", "error", ...(await decoder(encode)), "-ss", t.toFixed(3)];
     // Read as fast as it is watched, after a 40 s head start, so a whole film is never copied to disk at once.
     // Not faster: the playlist only keeps the last three minutes, and a stream that ran further and further
     // ahead would delete the piece the phone is still playing.
     args.push("-readrate", "1", "-readrate_initial_burst", "40", "-i", entry.file);
-    if (burn != null) args.push("-filter_complex", `[0:v:0][0:s:${burn}]overlay,scale=-2:'min(1080,ih)'[v]`, "-map", "[v]");
+    if (burn != null) args.push("-filter_complex", burnFilter(entry, burn), "-map", "[v]");
     else args.push("-map", "0:v:0");
     args.push("-map", `0:a:${audio}?`, "-sn");
     if (copy) args.push("-c:v", "copy", ...(entry.vcodec === "hevc" ? ["-tag:v", "hvc1"] : []));
     else {
       if (burn == null) args.push("-vf", "scale=-2:'min(1080,ih)'");
-      args.push(...(await encoder("hls")), "-g", "96");
+      args.push(...encode, "-g", "96");
     }
     args.push(
       "-c:a", "aac", "-ac", "2", "-b:a", "192k",
