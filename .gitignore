@@ -1,0 +1,16 @@
+# Installed packages and build output
+node_modules/
+dist-web/
+VayaView/
+releases/
+app/
+release/
+
+# Everything the app saves (stations, backups, TMDB token, phone pairing, library scan, caches).
+# Personal, and the TMDB token must never be published.
+Data/
+
+# Odds and ends
+_old-icon-stuff/
+*.log
+.claude/

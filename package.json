@@ -1,0 +1,34 @@
+{
+  "name": "vayaview",
+  "productName": "VayaView",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.mjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "app": "vite build && electron .",
+    "package": "vite build && node scripts/package.mjs",
+    "test": "node --experimental-strip-types --test src/lib/schedule/engine.test.ts src/lib/library/filename.test.ts src/lib/library/match.test.ts src/lib/library/reducer.test.ts src/lib/player/seam.test.ts",
+    "release": "vite build && node scripts/package.mjs && node scripts/zip-release.mjs"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "@tailwindcss/vite": "^4.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "clsx": "^2.1.1",
+    "electron": "^44.7.1",
+    "lucide-react": "^0.510.0",
+    "react": "^19.2.0",
+    "react-colorful": "^5.8.1",
+    "react-dom": "^19.2.0",
+    "tailwind-merge": "^3.5.0",
+    "tailwindcss": "^4.3.0",
+    "vite": "^8.2.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CaptainSamus/VayaView.git"
+  }
+}
