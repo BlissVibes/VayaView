@@ -712,6 +712,310 @@ export function createParlorHandler(options = {}) {
     fs.createReadStream(target).pipe(res);
   }
 
+  // ---------------------------------------------------------------- Library folders and stations
+  // Saved stations are filed under the library's folder list (parlor.v2.disk:<folders>), so a new
+  // folder would otherwise open on an empty set. When the list changes, the newest stations come
+  // along to the new name. The old copy is never removed, and an overwritten one gets an hourly backup.
+  const stationKey = (list) => `parlor.v2.disk:${list.join("|")}`;
+
+  function setFolders(list) {
+    const config = readJson(configFile, null) ?? {};
+    const before = stationKey(folders());
+    fs.writeFileSync(configFile, JSON.stringify({ ...config, folders: list, previous: before }, null, 2));
+    followStations();
+  }
+
+  /** Also run whenever the app loads its saved settings, for stations saved under the old name after the change. */
+  function followStations() {
+    try {
+      const previous = readJson(configFile, null)?.previous;
+      const current = stationKey(folders());
+      if (typeof previous !== "string" || previous === current) return;
+      const from = readJson(storeFile(previous), null);
+      if (typeof from?.value !== "string") return;
+      const to = readJson(storeFile(current), null);
+      if (to && Date.parse(to.at) >= Date.parse(from.at)) return;
+      writeStore(current, from.value);
+    } catch {
+      // The stations stay where they were; nothing is lost.
+    }
+  }
+
+  /** Measure new files now, so they are ready when the guide next loads. Waits for a scan already running. */
+  async function rescanSoon() {
+    if (scanning) await scanning.catch(() => {});
+    scanning ??= scan().finally(() => (scanning = null));
+    await scanning.catch(() => {});
+  }
+
+  // ---------------------------------------------------------------- Vintage TV
+  // Old TV recordings from the Internet Archive (archive.org): search, pick a file, download it into
+  // a folder that becomes part of the library. PC only; a phone can do none of this (handler.remote).
+  const IA = "https://archive.org";
+  const MAX_BYTES = 5e9;
+  const IA_VIDEO = /\.(mp4|m4v|mkv|avi|mov|mpe?g|ogv|webm|wmv|flv)$/i;
+  const FOLDER_KEY = "parlor.vintage.folder";
+  const downloadsFile = path.join(dataDir, "parlor-downloads.json");
+  const text = (value) => (Array.isArray(value) ? value.join(", ") : value == null ? "" : String(value));
+
+  /** Seconds from the ways archive.org writes a running time: "1847.2", "00:22:31", "30 minutes", "1h 2m". */
+  function seconds(value) {
+    const raw = text(value).trim().toLowerCase();
+    if (!raw) return 0;
+    if (/^\d+(:\d{1,2}){1,2}(\.\d+)?$/.test(raw)) return Math.round(raw.split(":").reduce((total, part) => total * 60 + Number(part), 0));
+    const unit = (pattern) => Number(pattern.exec(raw)?.[1] ?? 0);
+    const spelled = unit(/(\d+(?:\.\d+)?)\s*h/) * 3600 + unit(/(\d+(?:\.\d+)?)\s*m(?!s)/) * 60 + unit(/(\d+(?:\.\d+)?)\s*s/);
+    if (spelled) return Math.round(spelled);
+    const plain = Number(raw);
+    return Number.isFinite(plain) ? Math.round(plain) : 0;
+  }
+
+  /** Every archive.org answer is kept for half an hour, so going back and forth costs nothing. */
+  const iaCache = new Map();
+  async function iaJson(url) {
+    const hit = iaCache.get(url);
+    if (hit && Date.now() - hit.at < 30 * 60_000) return hit.value;
+    const response = await fetch(url, { headers: { "User-Agent": "VayaView" }, signal: AbortSignal.timeout(20_000) });
+    if (!response.ok) throw new Error(`The Internet Archive answered ${response.status}`);
+    const value = await response.json();
+    iaCache.set(url, { at: Date.now(), value });
+    if (iaCache.size > 200) iaCache.delete(iaCache.keys().next().value);
+    return value;
+  }
+
+  /** Up to 50 items under 5 GB, the most watched first from archive.org, then shown smallest first. */
+  async function vintageSearch(q) {
+    const params = new URLSearchParams({ q: `(${q}) AND mediatype:movies AND item_size:[1 TO ${MAX_BYTES}]`, rows: "50", page: "1", output: "json" });
+    for (const field of ["identifier", "title", "item_size", "downloads", "date", "description", "runtime"]) params.append("fl[]", field);
+    params.append("sort[]", "downloads desc");
+    const data = await iaJson(`${IA}/advancedsearch.php?${params}`);
+    return (data.response?.docs ?? [])
+      .map((doc) => ({
+        id: String(doc.identifier),
+        title: text(doc.title) || String(doc.identifier),
+        size: Number(doc.item_size) || 0,
+        downloads: Number(doc.downloads) || 0,
+        date: text(doc.date).slice(0, 10),
+        description: text(doc.description).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 240),
+        runtime: seconds(doc.runtime),
+      }))
+      .filter((item) => item.size > 0 && item.size <= MAX_BYTES)
+      .sort((a, b) => a.size - b.size);
+  }
+
+  /**
+   * An item's video files under 5 GB. archive.org often keeps a huge original (MPEG-2, AVI) beside its
+   * own MP4 copy; for each original the MP4 is marked as the one to get, since it plays straight away.
+   */
+  async function vintageItem(id) {
+    const data = await iaJson(`${IA}/metadata/${encodeURIComponent(id)}`);
+    const all = (data.files ?? []).filter((file) => IA_VIDEO.test(file.name ?? "") && file.format !== "Thumbnail" && !/thumb|sample/i.test(file.name));
+    const lengthOf = new Map(all.map((file) => [file.name, seconds(file.length)]));
+    const files = all
+      .map((file) => {
+        const original = file.source === "derivative" && file.original ? file.original : file.name;
+        return { name: file.name, size: Number(file.size) || 0, length: seconds(file.length) || lengthOf.get(original) || 0, format: text(file.format), original, best: false };
+      })
+      .filter((file) => file.size > 0 && file.size <= MAX_BYTES);
+    const rank = (file) => (/\.(mp4|m4v)$/i.test(file.name) ? 0 : 2) + (/512kb/i.test(`${file.format} ${file.name}`) ? 1 : 0);
+    const groups = new Map();
+    for (const file of files) groups.set(file.original, [...(groups.get(file.original) ?? []), file]);
+    for (const group of groups.values()) group.slice().sort((a, b) => rank(a) - rank(b) || a.size - b.size)[0].best = true;
+    files.sort((a, b) => Number(b.best) - Number(a.best) || a.size - b.size);
+    const meta = data.metadata ?? {};
+    return { id, title: text(meta.title) || id, date: text(meta.date).slice(0, 10), runtime: seconds(meta.runtime), files };
+  }
+
+  /** Windows: D:\SelfTV\Downloads, beside Data and outside the program folder (an update mirrors that one). Mac: ~/Movies/VayaView. */
+  function downloadFolder() {
+    const saved = readJson(storeFile(FOLDER_KEY), null)?.value;
+    if (typeof saved === "string" && saved) return saved;
+    return options.downloadsDir ?? (process.platform === "darwin" ? path.join(os.homedir(), "Movies", "VayaView") : path.join(path.dirname(dataDir), "Downloads"));
+  }
+
+  // The list survives restarts. Anything that was under way comes back paused, with its .part kept.
+  let downloads = [readJson(downloadsFile, [])].flat().filter((item) => item?.id && item.dest).map((item) => {
+    if (item.state === "done" || item.state === "error") return { ...item, speed: 0 };
+    let bytes = 0;
+    try {
+      bytes = fs.statSync(`${item.dest}.part`).size;
+    } catch {
+      // Not started yet.
+    }
+    return { ...item, state: "paused", bytes, speed: 0 };
+  });
+  const active = new Map();
+  const saveDownloads = () => {
+    try {
+      fs.writeFileSync(downloadsFile, JSON.stringify(downloads.map(({ speed, ...item }) => item), null, 2));
+    } catch {
+      // The list is only a convenience; the files themselves are what matter.
+    }
+  };
+  const safeName = (name) => name.replace(/[<>:"/\\|?*\x00-\x1f]/g, " ").replace(/\s+/g, " ").trim().replace(/[. ]+$/, "").slice(0, 100) || "Recording";
+
+  function addDownload(body) {
+    const identifier = String(body?.identifier ?? "");
+    const file = String(body?.file ?? "");
+    if (!/^[\w.-]+$/.test(identifier) || !file || file.split("/").includes("..") || !IA_VIDEO.test(file)) throw new Error("That is not a video file on archive.org.");
+    const same = downloads.find((item) => item.identifier === identifier && item.file === file && item.state !== "done");
+    if (same) return same;
+    // One folder per archive.org item, named after it: a series' episodes stay together, as a show.
+    const dest = path.join(downloadFolder(), safeName(String(body?.title ?? identifier)), safeName(path.basename(file)));
+    const item = {
+      id: crypto.randomBytes(6).toString("hex"),
+      identifier,
+      file,
+      title: String(body?.title ?? identifier).slice(0, 200),
+      url: `${IA}/download/${identifier}/${file.split("/").map(encodeURIComponent).join("/")}`,
+      dest,
+      bytes: 0,
+      total: Number(body?.size) || 0,
+      state: "queued",
+      error: null,
+      speed: 0,
+    };
+    downloads.push(item);
+    saveDownloads();
+    pump();
+    return item;
+  }
+
+  /** Two at a time, oldest first. */
+  function pump() {
+    for (const item of downloads) {
+      if (active.size >= 2) break;
+      if (item.state === "queued" && !active.has(item.id)) void runDownload(item);
+    }
+  }
+
+  async function runDownload(item) {
+    const control = new AbortController();
+    active.set(item.id, control);
+    Object.assign(item, { state: "downloading", error: null, speed: 0 });
+    const part = `${item.dest}.part`;
+    try {
+      fs.mkdirSync(path.dirname(item.dest), { recursive: true });
+      let have = fs.existsSync(part) ? fs.statSync(part).size : 0;
+      // A partly downloaded file carries on from where it stopped.
+      const response = await fetch(item.url, { headers: { "User-Agent": "VayaView", ...(have ? { Range: `bytes=${have}-` } : {}) }, signal: control.signal });
+      if (response.status !== 416) {
+        if (!response.ok || !response.body) throw new Error(`The Internet Archive answered ${response.status}`);
+        // The server ignored the resume request and sent the whole file: start again.
+        if (response.status !== 206) have = 0;
+        const length = Number(response.headers.get("content-length")) || 0;
+        if (length) item.total = have + length;
+        item.bytes = have;
+        const out = fs.createWriteStream(part, { flags: have ? "a" : "w" });
+        let since = Date.now();
+        let counted = 0;
+        try {
+          for await (const chunk of response.body) {
+            item.bytes += chunk.length;
+            counted += chunk.length;
+            const now = Date.now();
+            if (now - since >= 1000) {
+              item.speed = Math.round((counted * 1000) / (now - since));
+              since = now;
+              counted = 0;
+            }
+            if (!out.write(chunk)) await new Promise((resolve) => out.once("drain", resolve));
+          }
+        } finally {
+          await new Promise((resolve) => out.end(resolve));
+        }
+      }
+      const size = fs.statSync(part).size;
+      if (item.total && size < item.total) throw new Error("The download stopped early. Resume to carry on.");
+      // Never over an existing file: "name (2).mp4" instead.
+      let final = item.dest;
+      for (let n = 2; fs.existsSync(final); n++) final = item.dest.replace(/(\.[^.]+)$/, ` (${n})$1`);
+      fs.renameSync(part, final);
+      Object.assign(item, { dest: final, state: "done", bytes: size, total: size, speed: 0 });
+      void finished(path.dirname(path.dirname(final)));
+    } catch (error) {
+      item.speed = 0;
+      if (item.state === "cancelled") fs.rm(part, { force: true, maxRetries: 4, retryDelay: 300 }, () => {});
+      else if (!control.signal.aborted) Object.assign(item, { state: "error", error: error?.message ?? String(error) });
+    } finally {
+      active.delete(item.id);
+      if (item.state === "cancelled") downloads = downloads.filter((other) => other !== item);
+      saveDownloads();
+      pump();
+    }
+  }
+
+  /** A finished recording joins the library: its folder is added if need be, and the new files are measured. */
+  async function finished(folder) {
+    const roots = folders();
+    const inside = roots.some((root) => {
+      const rel = path.relative(root, folder);
+      return !rel.startsWith("..") && !path.isAbsolute(rel);
+    });
+    if (!inside) setFolders([...roots, folder]);
+    await rescanSoon();
+  }
+
+  function downloadsStatus() {
+    // The library folders too: a window opened before one was added must reload, not just rescan.
+    return { folder: downloadFolder(), folders: folders(), items: downloads.map(({ url, ...item }) => item) };
+  }
+
+  async function sendVintage(req, res, url, part) {
+    try {
+      if (url.pathname === "/api/vintage/search") {
+        const q = (url.searchParams.get("q") ?? "").trim().slice(0, 300);
+        if (!q) return sendJson(res, 400, { error: "Type something to look for." });
+        return sendJson(res, 200, { results: await vintageSearch(q) });
+      }
+      if (part[3] === "item" && part[4]) return sendJson(res, 200, await vintageItem(decodeURIComponent(part[4])));
+      if (url.pathname === "/api/vintage/downloads") return sendJson(res, 200, downloadsStatus());
+      if (req.method !== "POST") return sendJson(res, 405, { error: "POST only" });
+      if (url.pathname === "/api/vintage/download") {
+        addDownload(await readBody(req));
+        return sendJson(res, 200, downloadsStatus());
+      }
+      if (url.pathname === "/api/vintage/folder") {
+        const body = (await readBody(req)) ?? {};
+        let folder = typeof body.path === "string" ? body.path.trim() : "";
+        if (body.pick) folder = (await options.pickFolder?.("Where should Vintage TV recordings go?", downloadFolder())) ?? "";
+        if (folder) {
+          folder = path.resolve(expandHome(folder));
+          fs.mkdirSync(folder, { recursive: true });
+          writeStore(FOLDER_KEY, folder);
+        }
+        return sendJson(res, 200, downloadsStatus());
+      }
+      // /api/vintage/downloads/<id>/<pause|resume|cancel|remove>
+      const item = downloads.find((other) => other.id === part[4]);
+      if (!item) return sendJson(res, 404, { error: "No such download" });
+      const action = part[5];
+      if (action === "pause" && (item.state === "downloading" || item.state === "queued")) {
+        item.state = "paused";
+        active.get(item.id)?.abort();
+      } else if (action === "resume" && (item.state === "paused" || item.state === "error")) {
+        item.state = "queued";
+        pump();
+      } else if (action === "cancel" && item.state !== "done") {
+        // Stops it and throws away the part downloaded so far.
+        const running = active.get(item.id);
+        item.state = "cancelled";
+        if (running) running.abort();
+        else {
+          fs.rm(`${item.dest}.part`, { force: true }, () => {});
+          downloads = downloads.filter((other) => other !== item);
+        }
+      } else if (action === "remove" && item.state === "done") {
+        // Off the list only; the recording stays in the library.
+        downloads = downloads.filter((other) => other !== item);
+      }
+      saveDownloads();
+      return sendJson(res, 200, downloadsStatus());
+    } catch (error) {
+      return sendJson(res, 502, { error: error?.name === "TimeoutError" ? "The Internet Archive took too long to answer. Try again." : (error?.message ?? String(error)) });
+    }
+  }
+
   async function handler(req, res, next) {
     const url = new URL(req.url ?? "/", "http://localhost");
     const part = url.pathname.split("/");
@@ -809,8 +1113,12 @@ export function createParlorHandler(options = {}) {
       return sendJson(res, 200, nowShowing ?? {});
     }
     if (part[1] === "hls") return sendHls(req, res, part, url.searchParams);
+    if (part[1] === "api" && part[2] === "vintage") return sendVintage(req, res, url, part);
     if (url.pathname === "/api/store") {
-      if (req.method === "GET") return sendJson(res, 200, readStore());
+      if (req.method === "GET") {
+        followStations();
+        return sendJson(res, 200, readStore());
+      }
       const key = url.searchParams.get("key") ?? "";
       if (!key) return sendJson(res, 400, { error: "No key" });
       try {
@@ -839,7 +1147,7 @@ export function createParlorHandler(options = {}) {
       const wanted = Array.isArray(body?.folders) ? body.folders.map((item) => path.resolve(expandHome(String(item)))) : [];
       const bad = wanted.filter((dir) => !fs.existsSync(dir) || !fs.statSync(dir).isDirectory());
       if (bad.length > 0) return sendJson(res, 400, { error: `Not a folder: ${bad.join(", ")}` });
-      fs.writeFileSync(configFile, JSON.stringify({ folders: wanted }, null, 2));
+      setFolders(wanted);
       return sendJson(res, 200, { folders: wanted });
     }
 
@@ -888,7 +1196,7 @@ export function createParlorHandler(options = {}) {
     const cookie = /(?:^|;\s*)parlor_phone=([a-f0-9]+)/.exec(req.headers.cookie ?? "")?.[1];
     if (!cookie || !config.tokens.includes(cookie)) return sendJson(res, 401, { error: "pair" });
     const pcOnly =
-      /^\/api\/(phone|config|pick-folder|tmdb\/token|tmdb\/lookup|pair|update)/.test(url.pathname) ||
+      /^\/api\/(phone|config|pick-folder|vintage|tmdb\/token|tmdb\/lookup|pair|update)/.test(url.pathname) ||
       (url.pathname === "/api/fonts" && req.method !== "GET") ||
       (url.pathname === "/api/store" && req.method !== "GET") ||
       (url.pathname === "/api/now" && req.method !== "GET");
@@ -917,6 +1225,7 @@ export function createParlorHandler(options = {}) {
 
   handler.dispose = () => {
     for (const child of children) child.kill();
+    for (const control of active.values()) control.abort();
   };
   return handler;
 }
@@ -926,7 +1235,7 @@ export function parlorApi() {
   return {
     name: "parlor-api",
     configureServer(server) {
-      server.middlewares.use(createParlorHandler({ store: "store-dev" }));
+      server.middlewares.use(createParlorHandler({ store: "store-dev", dataDir: process.env.VAYAVIEW_DATA || undefined }));
     },
   };
 }

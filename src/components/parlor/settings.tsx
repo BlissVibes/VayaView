@@ -5,6 +5,7 @@ import { LibraryBar } from "./library-bar";
 import { PhoneAccess } from "./phone-access";
 import { ThemePicker } from "./theme-picker";
 import { TmdbBox } from "./tmdb-box";
+import { VintageTv } from "./vintage-tv";
 
 type SettingsProps = {
   onClose: () => void;
@@ -30,6 +31,9 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
  * It takes the guide's place under the picture, like Edit stations.
  */
 export function Settings({ onClose, onRescan, scanLabel, onRefresh, className }: SettingsProps) {
+  // Vintage TV is big enough to want the whole panel, so it opens in place of the settings.
+  const [vintage, setVintage] = useState(false);
+  if (vintage) return <VintageTv className={className} onClose={() => setVintage(false)} onRescan={onRescan} />;
   return (
     <section aria-label="Settings" className={cn("flex min-h-0 flex-col overflow-hidden rounded-screen bg-bezel text-cream", className)}>
       <header className="flex shrink-0 items-center gap-4 border-b border-screen px-4 py-2">
@@ -55,6 +59,14 @@ export function Settings({ onClose, onRescan, scanLabel, onRefresh, className }:
         </Section>
         <Section title="Phone">
           <PhoneAccess />
+        </Section>
+        <Section title="Vintage TV">
+          <p className="mb-3 text-xs text-cream/60">
+            Old cartoons, Saturday mornings and whole days taped off TV, from the Internet Archive. Downloads go into a folder that joins your library.
+          </p>
+          <button type="button" className="rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-room hover:opacity-90" onClick={() => setVintage(true)}>
+            Open Vintage TV
+          </button>
         </Section>
       </div>
     </section>

@@ -10,6 +10,9 @@ release/
 # Personal, and the TMDB token must never be published.
 Data/
 
+# Vintage TV recordings (beside Data, never inside the program folder, which updates mirror over).
+Downloads/
+
 # Odds and ends
 _old-icon-stuff/
 *.log
