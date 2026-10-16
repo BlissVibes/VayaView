@@ -80,6 +80,8 @@ type UpdateStatus = {
   available: boolean;
   notes?: string;
   error?: string;
+  /** Set when the last update did not finish (found at start-up). */
+  notice?: string | null;
   phase?: "idle" | "downloading" | "installing";
   progress?: number;
 };
@@ -133,6 +135,7 @@ function Updates() {
                   ? "You have the newest version."
                   : "No versions have been published yet."}
       </p>
+      {status.notice ? <p className="text-accent">{status.notice}</p> : null}
       {status.available && status.notes ? <p className="whitespace-pre-line text-cream/50">{status.notes}</p> : null}
       <div className="flex gap-2">
         {status.available && status.phase !== "downloading" && status.phase !== "installing" ? (

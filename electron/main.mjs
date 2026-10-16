@@ -120,7 +120,47 @@ function placeShortcuts() {
 // one replaces this copy where it stands (D:\SelfTV\VayaView, or VayaView.app), so there is only ever one VayaView.
 const REPO = "CaptainSamus/VayaView";
 const ASSET = MAC ? new RegExp(`^VayaView-darwin-${process.arch}\\.zip$`, "i") : /^VayaView-win32-x64\.zip$/i;
-const update = { phase: "idle", progress: 0, error: null };
+const update = { phase: "idle", progress: 0, error: null, notice: null };
+const UPDATE_WORK = path.join(DATA_DIR, "temp-update");
+
+/** Every step of an update goes in Data\update.log, so a failed one can be traced afterwards. */
+function updateLog(line) {
+  try {
+    fs.appendFileSync(path.join(DATA_DIR, "update.log"), `${new Date().toISOString()} ${line}\n`);
+  } catch {
+    // Nowhere to write; the update carries on.
+  }
+}
+
+/** A path inside a single-quoted PowerShell string. */
+const psQuote = (value) => `'${String(value).replace(/'/g, "''")}'`;
+
+/**
+ * Data\temp-update is removed by the update itself once the new version has started. Still there at
+ * start-up means the last update did not finish (or this is the new version, starting before the
+ * script tidied up). Either way it is logged and removed; nothing else is touched.
+ */
+function tidyLeftoverUpdate() {
+  if (!fs.existsSync(UPDATE_WORK)) return;
+  let wanted = "";
+  try {
+    wanted = fs.readFileSync(path.join(UPDATE_WORK, "version.txt"), "utf8").trim();
+  } catch {
+    // Updates before this one did not write it.
+  }
+  const current = app.getVersion();
+  if (wanted && wanted === current) {
+    updateLog(`Start-up: ${current} is installed; removing the leftover temp-update folder.`);
+  } else {
+    // One started a moment ago may still be copying; leave it alone this time.
+    if (Date.now() - fs.statSync(UPDATE_WORK).mtimeMs < 3 * 60_000) return updateLog("Start-up: an update looks to be under way; leaving temp-update alone.");
+    updateLog(`Start-up: the last update${wanted ? ` (to ${wanted})` : ""} did not finish; still running ${current}. Removing temp-update.`);
+    update.notice = `The last update${wanted ? ` (to ${wanted})` : ""} didn't finish, so this is still ${current}. You can try again.`;
+  }
+  fs.rm(UPDATE_WORK, { recursive: true, force: true, maxRetries: 8, retryDelay: 500 }, (error) => {
+    if (error) updateLog(`Could not remove temp-update: ${error.message}`);
+  });
+}
 
 /** "0.10.0" is newer than "0.9.2". */
 function newer(candidate, current) {
@@ -161,7 +201,7 @@ async function fetchRelease() {
 async function checkUpdate(fresh = false) {
   const current = app.getVersion();
   // While downloading or installing, report progress without asking GitHub anything.
-  if (update.phase !== "idle") return { supported: app.isPackaged, current, latest: releaseCache.value?.version ?? null, available: true, phase: update.phase, progress: update.progress, error: update.error };
+  if (update.phase !== "idle") return { supported: app.isPackaged, current, latest: releaseCache.value?.version ?? null, available: true, phase: update.phase, progress: update.progress, error: update.error, notice: update.notice };
   try {
     const release = await latestRelease(fresh);
     return {
@@ -173,35 +213,51 @@ async function checkUpdate(fresh = false) {
       phase: update.phase,
       progress: update.progress,
       error: update.error,
+      notice: update.notice,
     };
   } catch (error) {
-    return { supported: app.isPackaged, current, latest: null, available: false, phase: update.phase, error: `Could not reach GitHub (${error.message}).` };
+    return { supported: app.isPackaged, current, latest: null, available: false, phase: update.phase, error: `Could not reach GitHub (${error.message}).`, notice: update.notice };
   }
 }
 
 async function installUpdate() {
   if (!app.isPackaged || update.phase !== "idle") return;
-  Object.assign(update, { phase: "downloading", progress: 0, error: null });
+  Object.assign(update, { phase: "downloading", progress: 0, error: null, notice: null });
+  // A download that stops arriving for a minute is given up, instead of sitting at the same percent for ever.
+  const control = new AbortController();
+  let idle = null;
+  const alive = () => {
+    clearTimeout(idle);
+    idle = setTimeout(() => control.abort(), 60_000);
+  };
+  let out = null;
   try {
     const release = await latestRelease(true);
     if (!release?.asset || !newer(release.version, app.getVersion())) throw new Error("No newer version to install.");
-    const work = path.join(DATA_DIR, "temp-update");
+    updateLog(`Updating ${app.getVersion()} to ${release.version}.`);
+    const work = UPDATE_WORK;
     fs.rmSync(work, { recursive: true, force: true });
     fs.mkdirSync(work, { recursive: true });
+    // Read at the next start-up, to tell a finished update from one that stopped halfway.
+    fs.writeFileSync(path.join(work, "version.txt"), release.version);
 
     // Download, counting bytes for the progress bar.
     const zip = path.join(work, "VayaView.zip");
-    const response = await fetch(release.asset.browser_download_url, { headers: { "User-Agent": "VayaView" } });
+    alive();
+    const response = await fetch(release.asset.browser_download_url, { headers: { "User-Agent": "VayaView" }, signal: control.signal });
     if (!response.ok || !response.body) throw new Error(`Download failed (${response.status}).`);
     const total = Number(response.headers.get("content-length")) || release.asset.size || 1;
-    const out = fs.createWriteStream(zip);
+    out = fs.createWriteStream(zip);
     let received = 0;
     for await (const chunk of response.body) {
+      alive();
       received += chunk.length;
       update.progress = Math.min(1, received / total);
       if (!out.write(chunk)) await new Promise((resolve) => out.once("drain", resolve));
     }
+    clearTimeout(idle);
     await new Promise((resolve, reject) => out.end((error) => (error ? reject(error) : resolve())));
+    updateLog(`Downloaded ${received} bytes.`);
 
     update.phase = "installing";
     if (MAC) {
@@ -211,36 +267,63 @@ async function installUpdate() {
     }
     const unpacked = path.join(work, "new");
     await new Promise((resolve, reject) => {
-      const child = spawn("powershell.exe", ["-NoProfile", "-Command", `Expand-Archive -LiteralPath '${zip}' -DestinationPath '${unpacked}' -Force`], { windowsHide: true });
+      const child = spawn("powershell.exe", ["-NoProfile", "-Command", `Expand-Archive -LiteralPath ${psQuote(zip)} -DestinationPath ${psQuote(unpacked)} -Force`], { windowsHide: true });
+      child.on("error", () => reject(new Error("Could not start PowerShell to unpack the update.")));
       child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error("Could not unpack the update."))));
     });
+    updateLog("Unpacked.");
     // The zip holds the program's files, possibly inside one folder.
     const inner = fs.existsSync(path.join(unpacked, "VayaView.exe")) ? unpacked : path.join(unpacked, fs.readdirSync(unpacked)[0] ?? "");
     if (!fs.existsSync(path.join(inner, "VayaView.exe"))) throw new Error("The update did not contain VayaView.exe.");
 
     // A small script finishes the job once VayaView has closed: mirror the new files over this
-    // copy (removing anything the new version no longer has), then start it again.
+    // copy (removing anything the new version no longer has), then start it again. Every step goes
+    // in Data\update.log, with robocopy's own summary.
     const target = path.dirname(process.execPath);
     const script = path.join(work, "finish-update.ps1");
     fs.writeFileSync(
       script,
       [
-        `$target = '${target}'`,
-        `$source = '${inner}'`,
-        "for ($i = 0; $i -lt 120; $i++) { if (-not (Get-Process | Where-Object { $_.Path -like \"$target\\*\" })) { break }; Start-Sleep -Milliseconds 500 }",
-        'robocopy $source $target /MIR /R:10 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null',
-        'Start-Process (Join-Path $target "VayaView.exe")',
-        `Start-Sleep -Seconds 5; Remove-Item -LiteralPath '${work}' -Recurse -Force -ErrorAction SilentlyContinue`,
+        `$target = ${psQuote(target)}`,
+        `$source = ${psQuote(inner)}`,
+        `$work = ${psQuote(work)}`,
+        `$log = ${psQuote(path.join(DATA_DIR, "update.log"))}`,
+        "function Log($text) { Add-Content -LiteralPath $log -Value ((Get-Date).ToString('o') + ' finish-update: ' + $text) -ErrorAction SilentlyContinue }",
+        "try {",
+        "  Log 'Started. Waiting for VayaView to close.'",
+        "  $open = $true",
+        "  for ($i = 0; $i -lt 120; $i++) { if (-not (Get-Process | Where-Object { $_.Path -like \"$target\\*\" })) { $open = $false; break }; Start-Sleep -Milliseconds 500 }",
+        "  if ($open) { Log 'VayaView was still running after 60 seconds. Copying anyway.' } else { Log 'VayaView has closed. Copying the new files.' }",
+        '  robocopy $source $target /MIR /R:10 /W:1 /NFL /NDL /NP "/LOG+:$log" | Out-Null',
+        "  $code = $LASTEXITCODE",
+        '  if ($code -lt 8) { Log "Copied (robocopy code $code)." } else { Log "Copy FAILED (robocopy code $code). See the robocopy lines above." }',
+        "  Start-Process (Join-Path $target 'VayaView.exe')",
+        "  Log 'Started VayaView.'",
+        "  Start-Sleep -Seconds 5",
+        "  Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue",
+        "  if (Test-Path -LiteralPath $work) { Log 'Could not remove temp-update yet; VayaView removes it at its next start.' } else { Log 'Removed temp-update. Done.' }",
+        "} catch { Log ('Stopped by an error: ' + $_) }",
       ].join("\r\n"),
     );
-    spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", script], {
+    const finisher = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", script], {
       detached: true,
       stdio: "ignore",
       windowsHide: true,
-    }).unref();
+    });
+    // Close only once the script is really running; otherwise stay open and say what went wrong.
+    await new Promise((resolve, reject) => {
+      finisher.once("spawn", resolve);
+      finisher.once("error", (error) => reject(new Error(`Could not start the update script (${error.message}).`)));
+    });
+    finisher.unref();
+    updateLog("Started finish-update.ps1; closing VayaView.");
     setTimeout(() => app.quit(), 500);
   } catch (error) {
-    Object.assign(update, { phase: "idle", progress: 0, error: error.message });
+    clearTimeout(idle);
+    out?.destroy();
+    const message = control.signal.aborted ? "The download stopped arriving. Try again." : error.message;
+    updateLog(`Update failed: ${message}`);
+    Object.assign(update, { phase: "idle", progress: 0, error: message });
   }
 }
 
@@ -321,6 +404,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(async () => {
+    if (app.isPackaged) tidyLeftoverUpdate();
     if (app.isPackaged && WIN) {
       tidyOldCopies();
       try {
