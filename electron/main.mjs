@@ -3,6 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { pipeline } from "node:stream";
 import { app, BrowserWindow, dialog, Menu, shell } from "electron";
 import { createParlorHandler } from "../server/parlor-api.mjs";
 
@@ -60,7 +61,7 @@ function serveStatic(req, res) {
     file = path.join(WEB_ROOT, "index.html");
   }
   res.setHeader("Content-Type", MIME[path.extname(file)] ?? "application/octet-stream");
-  fs.createReadStream(file).pipe(res);
+  pipeline(fs.createReadStream(file), res, () => {});
 }
 
 /** The icon file shipped beside the program (its name changes with the picture, so Windows never shows a stale one). */

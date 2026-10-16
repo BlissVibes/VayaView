@@ -18,6 +18,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { pipeline } from "node:stream";
 
 const VIDEO_EXT = new Set([".mp4", ".m4v", ".mkv", ".mov", ".webm", ".avi", ".wmv", ".mpg", ".mpeg", ".m2ts", ".flv"]);
 const SUB_EXT = new Set([".srt", ".vtt", ".ass", ".ssa"]);
@@ -915,10 +916,12 @@ export function createParlorHandler(options = {}) {
     }
     const target = path.join(stream.dir, file);
     // The first pieces take a moment to appear.
-    for (let i = 0; i < 75; i++) {
+    for (let i = 0; i < 75 && !res.destroyed; i++) {
       if (fs.existsSync(target) && (file !== "index.m3u8" || /#EXTINF/.test(fs.readFileSync(target, "utf8")))) break;
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
+    // The phone gave up waiting (or moved on): send nothing.
+    if (res.destroyed) return;
     if (!fs.existsSync(target)) {
       res.statusCode = 404;
       return res.end();
@@ -930,7 +933,8 @@ export function createParlorHandler(options = {}) {
       return res.end(fs.readFileSync(target, "utf8").replace("#EXTM3U", "#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES"));
     }
     res.setHeader("Content-Type", file.endsWith(".m4s") ? "video/iso.segment" : "video/mp4");
-    fs.createReadStream(target).pipe(res);
+    // pipeline closes the file when the phone hangs up halfway; .pipe() left it open.
+    pipeline(fs.createReadStream(target), res, () => {});
   }
 
   // ---------------------------------------------------------------- Library folders and stations
@@ -1265,7 +1269,7 @@ export function createParlorHandler(options = {}) {
         }
         const types = { ".ttf": "font/ttf", ".otf": "font/otf", ".woff": "font/woff", ".woff2": "font/woff2" };
         res.setHeader("Content-Type", types[path.extname(name).toLowerCase()] ?? "application/octet-stream");
-        return fs.createReadStream(file).pipe(res);
+        return pipeline(fs.createReadStream(file), res, () => {});
       }
       if (req.method === "PUT") {
         const name = path.basename(url.searchParams.get("name") ?? "");
