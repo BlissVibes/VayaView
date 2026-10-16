@@ -46,13 +46,18 @@ if (WIN) app.setAppUserModelId(APP_ID);
 
 // A background hiccup (a stream folder that would not delete, a dropped connection) must not
 // put an error box in front of the picture. It goes in a log in the Data folder instead.
-process.on("uncaughtException", (error) => {
+process.on("uncaughtException", (error) => appendLog("errors.log", String(error?.stack ?? error)));
+
+/** One line in a log in the Data folder. At 1 MB the log starts again, and the one before is kept as <name>.old.log. */
+function appendLog(name, line) {
+  const file = path.join(DATA_DIR, name);
   try {
-    fs.appendFileSync(path.join(DATA_DIR, "errors.log"), `${new Date().toISOString()} ${error?.stack ?? error}\n`);
+    if (fs.existsSync(file) && fs.statSync(file).size > 1024 * 1024) fs.renameSync(file, file.replace(/\.log$/, ".old.log"));
+    fs.appendFileSync(file, `${new Date().toISOString()} ${line}\n`);
   } catch {
     // Nowhere to write; carry on.
   }
-});
+}
 
 function serveStatic(req, res) {
   const pathname = decodeURIComponent(new URL(req.url ?? "/", "http://localhost").pathname);
@@ -125,13 +130,7 @@ const update = { phase: "idle", progress: 0, error: null, notice: null };
 const UPDATE_WORK = path.join(DATA_DIR, "temp-update");
 
 /** Every step of an update goes in Data\update.log, so a failed one can be traced afterwards. */
-function updateLog(line) {
-  try {
-    fs.appendFileSync(path.join(DATA_DIR, "update.log"), `${new Date().toISOString()} ${line}\n`);
-  } catch {
-    // Nowhere to write; the update carries on.
-  }
-}
+const updateLog = (line) => appendLog("update.log", line);
 
 /** A path inside a single-quoted PowerShell string. */
 const psQuote = (value) => `'${String(value).replace(/'/g, "''")}'`;

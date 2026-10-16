@@ -111,7 +111,7 @@ export function useParlor() {
   /** Read the folders again with the app open. Stations pick up new files; what is playing keeps playing. */
   const rescan = useCallback(async (): Promise<RescanResult> => {
     const before = new Set(CATALOG.map((film) => film.id));
-    await loadDiskLibrary();
+    await loadDiskLibrary(true);
     if (libraryInfo.error) return { added: 0, removed: 0, error: libraryInfo.error };
     fillSchedule();
     const after = new Set(CATALOG.map((film) => film.id));

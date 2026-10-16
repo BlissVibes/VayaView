@@ -76,6 +76,8 @@ export function createParlorHandler(options = {}) {
   /** id -> entry, rebuilt on every scan. /media only serves what is in here. */
   let index = new Map();
   let scanning = null;
+  /** The last finished scan. A window (or phone) opening within ten minutes is handed this instead of a new walk of every folder. */
+  let lastScan = null;
   let ffprobeOk = true;
   let encoderArgs = null;
   const status = { phase: "idle", done: 0, total: 0 };
@@ -256,7 +258,9 @@ export function createParlorHandler(options = {}) {
     films.sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true }));
     fs.writeFileSync(cacheFile, JSON.stringify({ version: CACHE_VERSION, files: cache }));
     status.phase = "idle";
-    return { folders: roots, films, ffprobe: ffprobeOk, platform: process.platform };
+    const result = { folders: roots, films, ffprobe: ffprobeOk, platform: process.platform };
+    lastScan = { at: Date.now(), result };
+    return result;
   }
 
   /** True when ffmpeg can really encode with these settings on this machine. */
@@ -1264,6 +1268,9 @@ export function createParlorHandler(options = {}) {
     const part = url.pathname.split("/");
 
     if (url.pathname === "/api/library" && req.method === "GET") {
+      // ?rescan=1 (the Rescan button) always walks the folders again.
+      const recent = lastScan && Date.now() - lastScan.at < 10 * 60_000 && lastScan.result.folders.join("|") === folders().join("|");
+      if (recent && !scanning && url.searchParams.get("rescan") !== "1") return sendJson(res, 200, lastScan.result);
       scanning ??= scan().finally(() => (scanning = null));
       try {
         return sendJson(res, 200, await scanning);
