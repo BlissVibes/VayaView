@@ -67,9 +67,9 @@ export function createParlorHandler(options = {}) {
   const configFile = path.join(dataDir, "parlor-config.json");
   const cacheFile = path.join(dataDir, "parlor-library.json");
   const episodesFile = path.join(dataDir, "parlor-episodes.json");
-  // The dev server keeps its own store, so testing never overwrites the real app's stations.
+  // The dev server keeps its own store and its own backups, so testing never touches the real app's stations or copies.
   const storeDir = path.join(dataDir, options.store ?? "store");
-  const backupDir = path.join(dataDir, "backups");
+  const backupDir = path.join(dataDir, options.store && options.store !== "store" ? `${options.store}-backups` : "backups");
   fs.mkdirSync(storeDir, { recursive: true });
   fs.mkdirSync(backupDir, { recursive: true });
 
@@ -665,19 +665,37 @@ export function createParlorHandler(options = {}) {
     return all;
   }
 
+  /** The newest stations backup of any kind (hourly, on closing, or made by hand), as text. */
+  function newestBackup() {
+    let newest = null;
+    for (const name of fs.readdirSync(backupDir)) {
+      if (!name.startsWith("stations ") || !name.endsWith(".json")) continue;
+      const at = fs.statSync(path.join(backupDir, name)).mtimeMs;
+      if (!newest || at > newest.at) newest = { name, at };
+    }
+    return newest ? fs.readFileSync(path.join(backupDir, newest.name), "utf8") : null;
+  }
+  /** The hour already dealt with, so the backups folder is not read on every save. */
+  let backupHour = "";
+
   function writeStore(key, value) {
     const file = storeFile(key);
-    // Stations also get one copy per hour, taken from just before that hour's first change. The 72 newest are kept.
-    if (key.startsWith("parlor.v2") && fs.existsSync(file)) {
-      const copy = path.join(backupDir, `stations ${new Date().toISOString().slice(0, 13).replace("T", " ")}h.json`);
-      if (!fs.existsSync(copy)) {
-        try {
-          fs.writeFileSync(copy, JSON.parse(fs.readFileSync(file, "utf8")).value);
-          const old = fs.readdirSync(backupDir).filter((name) => name.startsWith("stations ")).sort().slice(0, -72);
+    // Stations also get one copy per hour, taken from just before that hour's first change, unless it is
+    // the same as the newest backup already there. The 72 newest hourly copies are kept; copies made on
+    // closing are kept separately (30), and copies made by hand are never removed.
+    const hour = new Date().toISOString().slice(0, 13).replace("T", " ");
+    if (key.startsWith("parlor.v2") && hour !== backupHour && fs.existsSync(file)) {
+      const copy = path.join(backupDir, `stations ${hour}h.json`);
+      try {
+        const before = JSON.parse(fs.readFileSync(file, "utf8")).value;
+        if (!fs.existsSync(copy) && before !== newestBackup()) {
+          fs.writeFileSync(copy, before);
+          const old = fs.readdirSync(backupDir).filter((name) => /^stations \d{4}-\d\d-\d\d \d\dh\.json$/.test(name)).sort().slice(0, -72);
           for (const name of old) fs.rmSync(path.join(backupDir, name), { force: true });
-        } catch {
-          // A missed hourly copy is not worth failing the save over.
         }
+        backupHour = hour;
+      } catch {
+        // A missed hourly copy is not worth failing the save over.
       }
     }
     const tmp = `${file}.tmp`;
