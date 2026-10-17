@@ -35,6 +35,8 @@ type PictureProps = {
   /** Stopped on a frame by the viewer. The clock-follow below leaves it be until this clears. */
   paused?: boolean;
   onToggleView: () => void;
+  /** YouTube refused the video playing now (its error code). The app moves on to another video. */
+  onRefused?: (mediaId: string, code: number) => void;
   className?: string;
 };
 
@@ -61,7 +63,7 @@ function streamUrl(mediaId: string, query: string): string {
 type Level = 0 | 1 | 2;
 
 export function Picture(props: PictureProps) {
-  const { powered, channel, airing, film, request, digits, notice, audio, sub, adjust, compact, toolbar, footer, seekToken, paused = false, onToggleView, className } = props;
+  const { powered, channel, airing, film, request, digits, notice, audio, sub, adjust, compact, toolbar, footer, seekToken, paused = false, onToggleView, onRefused, className } = props;
   const station = channel ? formatStation(channel.number) : "--";
   const missing = request?.status === "missing";
 
@@ -417,7 +419,10 @@ export function Picture(props: PictureProps) {
           paused={paused}
           muted={muted}
           volume={volume}
-          onError={(code) => setYtError({ key: tuneKey, code })}
+          onError={(code) => {
+            setYtError({ key: tuneKey, code });
+            if (mediaId) onRefused?.(mediaId, code);
+          }}
           onAutoMuted={() => setMuted(true)}
           className={ytRefused != null ? "hidden" : undefined}
         />

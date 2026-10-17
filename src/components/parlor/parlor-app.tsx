@@ -49,6 +49,9 @@ const POSITION_END_MS = 5000;
 const peakCache = new Map<string, Peak[]>();
 const peakAsked = new Map<string, Promise<Peak[] | null>>();
 
+/** YouTube videos YouTube refused to play in the app this run. A station skips them. Cleared on restart, so a changed setting gets another chance. */
+const unplayable = new Set<string>();
+
 /** The peaks of one video, from the cache or from yt-dlp (two to five seconds the first time). Null when it could not be asked. */
 function fetchPeaks(videoId: string): Promise<Peak[] | null> {
   const known = peakCache.get(videoId);
@@ -306,6 +309,35 @@ export function ParlorApp() {
     setSeekToken((value) => value + 1);
   }
 
+  /** A synthetic airing: one video of this station, started now, outside the station's own order. */
+  function airingOf(on: Channel, mediaId: string, slotIndex: number): { airing: Airing; film: Film } | null {
+    const entry = scheduleLibrary.get(mediaId);
+    const entryFilm = catalogById.get(mediaId);
+    if (!entry || !entryFilm || !(entry.durationMs > 0) || now == null) return null;
+    const durationMs = entry.durationMs;
+    return {
+      film: entryFilm,
+      airing: {
+        channelId: on.id,
+        cycleIndex: -1,
+        slotIndex,
+        offsetMs: 0,
+        remainingMs: durationMs,
+        startedAtMs: now,
+        endsAtMs: now + durationMs,
+        slot: { mediaId, title: entry.title, durationMs, status: "ready" },
+        next: null,
+      },
+    };
+  }
+
+  /** This station's videos that can air: known, with a length, on disk (or on YouTube), and not refused by YouTube this run. */
+  function playableOf(on: Channel) {
+    return on.mediaIds
+      .map((mediaId, slotIndex) => ({ mediaId, slotIndex }))
+      .filter((item) => (scheduleLibrary.get(item.mediaId)?.durationMs ?? 0) > 0 && catalogById.has(item.mediaId) && !parlor.missing.has(item.mediaId) && !unplayable.has(item.mediaId));
+  }
+
   /**
    * Surf (S): another video of this station, at its surf point. A station of one video lands on
    * another moment of it instead. Like a scrub it is a look, not an edit; Back to Live drops onto the clock.
@@ -313,29 +345,47 @@ export function ParlorApp() {
   function surf() {
     if (!channel || !state.powered || now == null) return;
     const current = airing?.slot.mediaId;
-    const playable = channel.mediaIds
-      .map((mediaId, slotIndex) => ({ mediaId, slotIndex, entry: scheduleLibrary.get(mediaId), film: catalogById.get(mediaId) }))
-      .filter((item) => item.entry && item.film && item.entry.durationMs > 0 && !parlor.missing.has(item.mediaId));
-    if (playable.length === 0) return;
+    const playable = playableOf(channel);
     const others = playable.filter((item) => item.mediaId !== current);
-    const pick = (others.length > 0 ? others : playable)[Math.floor(Math.random() * (others.length > 0 ? others : playable).length)]!;
-    const durationMs = pick.entry!.durationMs;
-    const synthetic: Airing = {
-      channelId: channel.id,
-      cycleIndex: -1,
-      slotIndex: pick.slotIndex,
-      offsetMs: 0,
-      remainingMs: durationMs,
-      startedAtMs: now,
-      endsAtMs: now + durationMs,
-      slot: { mediaId: pick.mediaId, title: pick.entry!.title, durationMs, status: "ready" },
-      next: null,
-    };
-    const landing = surfLanding(channel, synthetic, pick.film!, "start");
+    const from = others.length > 0 ? others : playable;
+    const pick = from[Math.floor(Math.random() * from.length)];
+    const made = pick ? airingOf(channel, pick.mediaId, pick.slotIndex) : null;
+    if (!made) return;
+    const landing = surfLanding(channel, made.airing, made.film, "start");
     if (!landing) return;
     setHeld(landing);
     setSeekToken((value) => value + 1);
   }
+
+  /**
+   * YouTube would not play this video (the owner does not allow embedding, or it is gone). Remember
+   * that for this run and move straight on to the station's next video in its lineup, from its start
+   * (or its surf point). The clock is left alone: Back to Live returns to it, and if the clock is
+   * still on the refused video, that is skipped again at once.
+   */
+  function skipRefused(mediaId: string, code: number) {
+    unplayable.add(mediaId);
+    if (!channel || !state.powered || isRemote) return;
+    const playable = playableOf(channel);
+    if (playable.length === 0) return;
+    const at = channel.mediaIds.indexOf(mediaId);
+    const pick = playable.find((item) => item.slotIndex > at) ?? playable[0]!;
+    const made = airingOf(channel, pick.mediaId, pick.slotIndex);
+    if (!made) return;
+    const landing = surfLanding(channel, made.airing, made.film, "start") ?? { channelId: channel.id, airing: made.airing, film: made.film, startMs: Date.now() };
+    setHeld(landing);
+    setSeekToken((value) => value + 1);
+    const title = catalogById.get(mediaId)?.title ?? "a video";
+    setScanNote(`Skipped ${title.length > 40 ? `${title.slice(0, 39)}…` : title}: ${code === 100 ? "no longer on YouTube" : "YouTube won't play it outside youtube.com"}`);
+    window.setTimeout(() => setScanNote(null), 3500);
+  }
+
+  // Landing (by the clock, a stored position, or Back to Live) on a video already refused this run: skip it without waiting for YouTube to refuse again.
+  const refusedNow = !isRemote && film?.youtubeId && unplayable.has(film.id) ? film.id : null;
+  useEffect(() => {
+    if (refusedNow) skipRefused(refusedNow, 150);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only when the refused programme comes up
+  }, [refusedNow, state.tunedId]);
 
   function seekTo(ms: number) {
     if (!channel || !airing || !film || airing.slot.status !== "ready") return;
@@ -532,6 +582,7 @@ export function ParlorApp() {
             seekToken={seekToken}
             paused={paused}
             onToggleView={toggleView}
+            onRefused={skipRefused}
             toolbar={
               <div className="flex items-start gap-3">
                 <TrackMenu tracks={tracks} className="flex flex-col gap-1.5" />
