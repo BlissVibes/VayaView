@@ -43,6 +43,14 @@ type PictureProps = {
 /** How long the title card stays up once real frames are showing. */
 const CARD_MS = 5000;
 
+/**
+ * YouTube videos the viewer chose to play through yt-dlp, because YouTube would not play them inside
+ * the app. Kept for this run, so coming back to one plays it the same way without asking again.
+ */
+const viaYtdlp = new Set<string>();
+/** How long the "play it anyway?" question waits before the station moves on by itself. */
+const ASK_MS = 10_000;
+
 /** This phone page. Each tune gets its own stream under it, so an old stream's last pieces never mix into a new one. */
 const HLS_SESSION = Math.random().toString(36).slice(2, 12);
 let hlsTune = 0;
@@ -98,12 +106,19 @@ export function Picture(props: PictureProps) {
   const ytRefused = youtubeId && tuneKey && ytError?.key === tuneKey ? ytError.code : null;
   // A phone cannot follow onto a YouTube station: the embed plays on the PC only.
   const ytElsewhere = youtubeId != null && isRemote;
-  const fileId = youtubeId ? null : mediaId;
-  const fileTuneKey = youtubeId ? null : tuneKey;
+  // A refused video the viewer chose to play anyway comes through yt-dlp into the ordinary <video>, as an ffmpeg session would.
+  const [, setChoice] = useState(0);
+  const ytdlp = youtubeId != null && !isRemote && viaYtdlp.has(youtubeId);
+  /** Refused, and not yet answered: the card asks whether to play it through yt-dlp. */
+  const asking = ytRefused != null && !ytdlp && (ytRefused === 101 || ytRefused === 150);
+  const fileId = youtubeId && !ytdlp ? null : mediaId;
+  const fileTuneKey = youtubeId && !ytdlp ? null : tuneKey;
+  /** The yt-dlp stream has shown its first frame. Until then the card says it is on its way. */
+  const [ytdlpStarted, setYtdlpStarted] = useState<string | null>(null);
   const burn = sub && !sub.text ? sub.key : null;
   const canCopy = film?.vcodec === "h264" || film?.vcodec === "hevc";
   // A phone never plays the file directly (an iPhone cannot open MKV); it starts at the copy step.
-  const startLevel: Level = burn != null ? 2 : !isRemote && film?.direct !== false && audio === 0 ? 0 : canCopy ? 1 : 2;
+  const startLevel: Level = ytdlp ? 2 : burn != null ? 2 : !isRemote && film?.direct !== false && audio === 0 ? 0 : canCopy ? 1 : 2;
   const playKey = fileTuneKey ? `${fileTuneKey}:${audio}:${burn ?? ""}` : null;
   const level: Level = bump && bump.key === playKey && bump.level > startLevel ? bump.level : startLevel;
 
@@ -167,6 +182,8 @@ export function Picture(props: PictureProps) {
             if (body?.found) begin(streamUrl(mediaId, `v=copy&a=${audio}&t=${body.t.toFixed(3)}`), body.base);
             else setBump({ key: playKey, level: 2 });
           });
+      } else if (ytdlp && youtubeId) {
+        begin(`/api/youtube/stream/${youtubeId}?t=${start.toFixed(2)}`, start);
       } else {
         begin(streamUrl(mediaId, `v=enc&a=${audio}&t=${start.toFixed(2)}${burn != null ? `&burn=${burn}` : ""}`), start);
       }
@@ -183,7 +200,27 @@ export function Picture(props: PictureProps) {
       control.abort();
       for (const once of onLoaded) video.removeEventListener("loadedmetadata", once);
     };
-  }, [playKey, fileId, level, audio, burn, reload]);
+  }, [playKey, fileId, level, audio, burn, reload, ytdlp, youtubeId]);
+
+  // The question waits ten seconds, then the station moves on, so a set left alone keeps playing.
+  useEffect(() => {
+    if (!asking || !mediaId || ytRefused == null) return;
+    const timer = window.setTimeout(() => onRefused?.(mediaId, ytRefused), ASK_MS);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per question
+  }, [asking, tuneKey]);
+
+  // yt-dlp could not play it either: move on.
+  useEffect(() => {
+    if (ytdlp && failed && mediaId) onRefused?.(mediaId, -1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per failure
+  }, [ytdlp, failed]);
+
+  function playViaYtdlp() {
+    if (!youtubeId) return;
+    viaYtdlp.add(youtubeId);
+    setChoice((value) => value + 1);
+  }
 
   useEffect(() => {
     retries.current = 0;
@@ -304,7 +341,7 @@ export function Picture(props: PictureProps) {
   changeRef.current = changeVolume;
   /** True while the YouTube frame is the player, for handlers set up once (the M key, the wheel). */
   const youtubeRef = useRef(false);
-  youtubeRef.current = youtubeId != null && !ytElsewhere;
+  youtubeRef.current = youtubeId != null && !ytElsewhere && !ytdlp;
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.volume = volume;
@@ -362,7 +399,7 @@ export function Picture(props: PictureProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const ytBroken = ytRefused != null || ytElsewhere;
+  const ytBroken = (ytRefused != null && !ytdlp) || ytElsewhere;
   const live = mediaId != null && !failed && !ytBroken;
   const showing = powered && !digits && airing != null && film != null && !missing && !failed;
   const hideCard = live && !digits && !notice && (compact || !card);
@@ -392,7 +429,10 @@ export function Picture(props: PictureProps) {
         ref={videoRef}
         playsInline
         onTimeUpdate={onTime}
-        className={cn("absolute inset-0 h-full w-full object-contain", filter ? "" : "bg-black", live && !youtubeId ? "" : "hidden")}
+        className={cn("absolute inset-0 h-full w-full object-contain", filter ? "" : "bg-black", live && (!youtubeId || ytdlp) ? "" : "hidden")}
+        onPlaying={() => {
+          if (ytdlp && playKey) setYtdlpStarted(playKey);
+        }}
         style={filter ? { filter } : undefined}
         onError={() => {
           if (!playKey) return;
@@ -410,7 +450,7 @@ export function Picture(props: PictureProps) {
         }}
       />
 
-      {youtubeId && tuneKey && !ytElsewhere ? (
+      {youtubeId && tuneKey && !ytElsewhere && !ytdlp ? (
         <YouTubeFrame
           videoId={youtubeId}
           offsetRef={offsetRef}
@@ -421,7 +461,8 @@ export function Picture(props: PictureProps) {
           volume={volume}
           onError={(code) => {
             setYtError({ key: tuneKey, code });
-            if (mediaId) onRefused?.(mediaId, code);
+            // Gone or broken: move on. Not allowed to embed: ask first whether to play it through yt-dlp.
+            if (mediaId && code !== 101 && code !== 150) onRefused?.(mediaId, code);
           }}
           onAutoMuted={() => setMuted(true)}
           className={ytRefused != null ? "hidden" : undefined}
@@ -476,6 +517,12 @@ export function Picture(props: PictureProps) {
       {live && muted ? (
         <p className="absolute top-3 left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-xs text-cream">
           Muted · click the picture for sound
+        </p>
+      ) : null}
+
+      {live && ytdlp && ytdlpStarted !== playKey ? (
+        <p className="pointer-events-none absolute top-1/2 left-1/2 z-20 -translate-x-1/2 -translate-y-1/2 rounded-full bg-black/60 px-5 py-2 text-sm text-cream">
+          Loading through yt-dlp… about 10 seconds
         </p>
       ) : null}
 
@@ -544,15 +591,27 @@ export function Picture(props: PictureProps) {
               <h1 className="text-2xl leading-tight sm:text-4xl">{film.title}</h1>
               <p className="mt-3 text-sm text-accent">YouTube stations play on the PC only.</p>
             </>
-          ) : ytRefused != null ? (
+          ) : asking && ytRefused != null ? (
+            <>
+              <h1 className="text-2xl leading-tight sm:text-4xl">{film.title}</h1>
+              <p className="mt-3 max-w-lg text-sm text-pretty text-cream/80">
+                YouTube won't play this video inside the app (error {ytRefused}). It can be played through yt-dlp instead, but it takes about 10 seconds to start.
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-2" onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
+                <button type="button" className="rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-room hover:opacity-90" onClick={playViaYtdlp}>
+                  Play it anyway (about 10 s)
+                </button>
+                <button type="button" className="rounded-md bg-cream/15 px-3 py-1.5 text-xs text-cream hover:bg-cream/25" onClick={() => mediaId && onRefused?.(mediaId, ytRefused)}>
+                  Skip to the next video
+                </button>
+                <span className="text-xs text-cream/50">Skips by itself in 10 seconds</span>
+              </div>
+            </>
+          ) : ytRefused != null && !ytdlp ? (
             <>
               <h1 className="text-2xl leading-tight sm:text-4xl">{film.title}</h1>
               <p className="mt-3 max-w-lg text-sm text-accent">
-                {ytRefused === 101 || ytRefused === 150
-                  ? `This video can't be embedded; YouTube only allows it on youtube.com (error ${ytRefused}).`
-                  : ytRefused === 100
-                    ? "This video has been removed from YouTube, or made private."
-                    : `YouTube would not play this video (error ${ytRefused}).`}
+                {ytRefused === 100 ? "This video has been removed from YouTube, or made private." : `YouTube would not play this video (error ${ytRefused}).`}
                 {airing.next ? ` Next is ${airing.next.title}.` : ""}
               </p>
             </>

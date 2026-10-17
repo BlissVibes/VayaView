@@ -48,6 +48,9 @@ Corridor Digital and Pokelawls are there as one-click starters.
 
 - The videos play in **YouTube's own player**, inside the picture. Nothing is downloaded, and they
   need the Internet. YouTube stations play on the PC only, not on a phone.
+- Some videos are not allowed to play outside youtube.com. When one comes up, the picture offers to
+  **play it anyway through yt-dlp** (streamed, not saved; about 10 seconds to start), or skips to the
+  station's next video. Unanswered, it skips by itself after 10 seconds.
 - Finding videos (and each video's most-replayed moments) needs **yt-dlp** on the PC:
   `brew install yt-dlp` on a Mac, `winget install yt-dlp` on Windows. Settings › Surfing says
   whether it is there.

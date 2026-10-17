@@ -376,7 +376,7 @@ export function ParlorApp() {
     setHeld(landing);
     setSeekToken((value) => value + 1);
     const title = catalogById.get(mediaId)?.title ?? "a video";
-    setScanNote(`Skipped ${title.length > 40 ? `${title.slice(0, 39)}…` : title}: ${code === 100 ? "no longer on YouTube" : "YouTube won't play it outside youtube.com"}`);
+    setScanNote(`Skipped ${title.length > 40 ? `${title.slice(0, 39)}…` : title}: ${code === 100 ? "no longer on YouTube" : code === -1 ? "yt-dlp could not play it either" : "YouTube won't play it outside youtube.com"}`);
     window.setTimeout(() => setScanNote(null), 3500);
   }
 

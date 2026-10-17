@@ -8,12 +8,17 @@
  *   GET  /api/youtube/side?url=&name=         other channels that look like the same person's (vlogs, music, clips…)
  *   GET  /api/youtube/list?url=               the videos of a playlist, a channel tab, or "ytsearch30:words"
  *   GET  /api/youtube/video/:id               one video's most-replayed peaks and chapters (cached for a month)
+ *   GET  /api/youtube/stream/:id?t=           the video itself through yt-dlp and ffmpeg, from t seconds, for one the
+ *                                             viewer chose to play although YouTube will not embed it (about 10 s to start)
  *   GET  /api/youtube/library                 every YouTube video a station has used
  *   POST /api/youtube/library { videos }      remember videos, so the library can air them
  *
  * yt-dlp is optional, like ffmpeg: `brew install yt-dlp` on a Mac, `winget install yt-dlp` on Windows.
+ *
+ * The one exception to "played in YouTube's player": a video YouTube refuses to embed, which the viewer
+ * has chosen to play anyway. That is streamed (never saved) through yt-dlp and ffmpeg, only on the PC.
  */
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -35,6 +40,7 @@ const SIDE_KINDS = [
 
 export function createYoutube({ dataDir, findTool, pool }) {
   const YTDLP = findTool("yt-dlp");
+  const FFMPEG = findTool("ffmpeg");
   const cacheFile = path.join(dataDir, "youtube-cache.json");
   const libraryFile = path.join(dataDir, "parlor-youtube.json");
   const cache = readJson(cacheFile, {});
@@ -296,6 +302,56 @@ export function createYoutube({ dataDir, findTool, pool }) {
     });
   }
 
+  /**
+   * Where a video's picture and sound can be read, as yt-dlp finds them: H.264 up to 1080p (which the
+   * app's player takes as it is) and AAC sound, or one file with both. The addresses expire after some
+   * hours, so they are kept for one.
+   */
+  const sources = new Map();
+  function sourcesOf(id) {
+    const hit = sources.get(id);
+    if (hit && Date.now() - hit.at < 60 * 60_000) return Promise.resolve(hit.urls);
+    return new Promise((resolve, reject) => {
+      const format = "bv*[vcodec^=avc1][height<=1080][protocol=https]+ba[ext=m4a][protocol=https]/b[ext=mp4][protocol=https]";
+      execFile(YTDLP, ["--no-warnings", "--ignore-config", "--no-playlist", "-g", "-f", format, `https://www.youtube.com/watch?v=${id}`], { timeout: 60_000, windowsHide: true }, (error, stdout, stderr) => {
+        if (error) {
+          if (error.code === "ENOENT") return reject(new Error("yt-dlp is not installed."));
+          const line = String(stderr ?? "").split("\n").find((text) => /ERROR/.test(text)) ?? error.message;
+          return reject(new Error(line.replace(/^ERROR:\s*/, "").slice(0, 300)));
+        }
+        const urls = String(stdout).split("\n").map((text) => text.trim()).filter((text) => /^https:\/\//.test(text));
+        if (urls.length === 0) return reject(new Error("yt-dlp found no stream for that video."));
+        sources.set(id, { at: Date.now(), urls });
+        resolve(urls);
+      });
+    });
+  }
+
+  /**
+   * The video from `t` seconds, as fragmented MP4, for the app's own <video>. Picture and sound are
+   * copied, not re-encoded; ffmpeg starts the picture on the keyframe at or before `t` and keeps both
+   * on their own clock, so they stay together. Stopped the moment the viewer leaves.
+   */
+  async function stream(req, res, id, t) {
+    if (!/^[\w-]{11}$/.test(id)) return sendJson(res, 400, { error: "That is not a YouTube video id." });
+    const urls = await sourcesOf(id);
+    if (res.destroyed) return;
+    const at = Math.max(0, t).toFixed(3);
+    const input = urls.length >= 2 ? ["-ss", at, "-i", urls[0], "-ss", at, "-i", urls[1], "-map", "0:v:0", "-map", "1:a:0"] : ["-ss", at, "-i", urls[0], "-map", "0:v:0", "-map", "0:a:0?"];
+    const args = ["-v", "error", "-noaccurate_seek", ...input, "-c", "copy", "-copyts", "-start_at_zero", "-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "pipe:1"];
+    const child = spawn(FFMPEG, args, { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Cache-Control", "no-store");
+    child.stdout.pipe(res);
+    child.on("error", () => res.destroy());
+    // An address that expired gives ffmpeg nothing to read; forget it so the next try asks yt-dlp again.
+    child.on("exit", (code) => {
+      if (code) sources.delete(id);
+    });
+    res.on("close", () => child.kill());
+  }
+
   // The videos stations have used: id, title, length, channel. The app's library airs these.
   function readLibrary() {
     const saved = readJson(libraryFile, { videos: {} });
@@ -353,6 +409,7 @@ export function createYoutube({ dataDir, findTool, pool }) {
         return sendJson(res, 200, await list(source.slice(0, 500))), true;
       }
       if (part[3] === "video" && part[4]) return sendJson(res, 200, await detail(part[4])), true;
+      if (part[3] === "stream" && part[4]) return await stream(req, res, part[4], Number(url.searchParams.get("t")) || 0), true;
       return sendJson(res, 404, { error: "Not found" }), true;
     } catch (error) {
       return sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) }), true;
