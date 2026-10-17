@@ -3,6 +3,7 @@ import { useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { isRemote } from "@/lib/remote";
 import { loadDiskLibrary } from "@/lib/library/disk";
+import { loadYoutubeLibrary } from "@/lib/library/youtube";
 import { loadDurable } from "@/lib/durable";
 import { applyFonts, loadFonts } from "@/lib/fonts";
 import { applyTheme, loadTheme } from "@/lib/theme";
@@ -77,6 +78,8 @@ async function boot() {
   }, 700);
   // The library must be in place before the app modules build their lookups.
   await loadDiskLibrary();
+  // The YouTube videos stations use join the catalogue after the disk's, before anything reads it.
+  await loadYoutubeLibrary();
   window.clearInterval(poll);
   const { ParlorApp } = await import("./components/parlor/parlor-app");
   root.render(<ParlorApp />);

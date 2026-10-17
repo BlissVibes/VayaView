@@ -14,6 +14,8 @@ type SeekBarProps = {
   /** The picture is stopped on this frame. The station's clock keeps running underneath. */
   paused?: boolean;
   onPause?: () => void;
+  /** Another video of this station at its surf point (S). Only on stations with a surf mode. */
+  onSurf?: () => void;
   className?: string;
 };
 
@@ -34,7 +36,7 @@ const stepClass = "rounded-md bg-cream/10 px-2 py-1 text-xs text-cream hover:bg-
  * Scrubbing is a look, not an edit. The station's clock keeps running
  * underneath, nothing here is saved, and Live always drops back onto it.
  */
-export function SeekBar({ offsetMs, durationMs, shifted, behindMs, onSeek, onLive, paused = false, onPause, className }: SeekBarProps) {
+export function SeekBar({ offsetMs, durationMs, shifted, behindMs, onSeek, onLive, paused = false, onPause, onSurf, className }: SeekBarProps) {
   // While the thumb is held, show where it is without restarting the picture on every pixel.
   const [drag, setDrag] = useState<number | null>(null);
   const at = drag ?? offsetMs;
@@ -82,6 +84,11 @@ export function SeekBar({ offsetMs, durationMs, shifted, behindMs, onSeek, onLiv
         <button type="button" className={stepClass} onClick={() => onSeek(offsetMs + 30_000)} title="Forward 30 seconds (→)">
           +30s
         </button>
+        {onSurf ? (
+          <button type="button" className={stepClass} onClick={onSurf} title="Another video of this station, at its surf point (S)">
+            ⤳ Surf
+          </button>
+        ) : null}
         <span className="ml-auto">{paused ? `Paused · ${where}` : shifted ? where : ""}</span>
         <button
           type="button"

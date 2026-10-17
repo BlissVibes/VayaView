@@ -1,3 +1,4 @@
+import type { Schedulable } from "../schedule/types.ts";
 import type { Film } from "./types.ts";
 
 const m = (minutes: number) => minutes * 60_000;
@@ -288,6 +289,39 @@ export function setDiskLibrary(films: Film[], missingIds: string[]): void {
   for (const entry of films) catalogById.set(entry.id, entry);
   diskMissingIds.clear();
   for (const id of missingIds) diskMissingIds.add(id);
+  // YouTube videos are not on disk, so a rescan does not find them. They go back in after every one.
+  for (const entry of youtubeFilms) addToCatalog(entry);
+}
+
+/**
+ * The YouTube videos stations have used. Kept apart from the disk library so a rescan, which
+ * starts the catalogue over, can put them straight back. See ./youtube.ts.
+ */
+export const youtubeFilms: Film[] = [];
+
+function addToCatalog(entry: Film) {
+  const at = CATALOG.findIndex((item) => item.id === entry.id);
+  if (at >= 0) CATALOG[at] = entry;
+  else CATALOG.push(entry);
+  catalogById.set(entry.id, entry);
+}
+
+/** Add YouTube videos to the catalogue in place. One already there is replaced (its title or length may have changed). */
+export function addYoutubeFilms(films: readonly Film[]): void {
+  for (const entry of films) {
+    const at = youtubeFilms.findIndex((item) => item.id === entry.id);
+    if (at >= 0) youtubeFilms[at] = entry;
+    else youtubeFilms.push(entry);
+    addToCatalog(entry);
+  }
+}
+
+/** What the schedule can place. Refilled in place after a rescan or new YouTube videos, so every reader sees the new library. */
+export const scheduleLibrary = new Map<string, Schedulable>();
+
+export function fillSchedule(): void {
+  scheduleLibrary.clear();
+  for (const entry of CATALOG) scheduleLibrary.set(entry.id, { id: entry.id, title: entry.title, durationMs: entry.durationMs });
 }
 
 export function sceneAt(entry: Film, offsetMs: number): string {

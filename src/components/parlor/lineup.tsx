@@ -6,7 +6,7 @@ import { FREE_CHANNELS, SUGGESTION_GROUPS, suggestStations, type Suggestion } fr
 import type { ParlorAction } from "@/lib/library/reducer";
 import type { ParlorState } from "@/lib/library/state";
 import type { Film } from "@/lib/library/types";
-import type { Channel, ChannelMode } from "@/lib/schedule/types";
+import type { Channel, ChannelMode, SurfMode } from "@/lib/schedule/types";
 import { formatStation } from "@/lib/format";
 import { CHANNEL_COLORS } from "@/lib/theme";
 import { cn } from "@/lib/cn";
@@ -14,6 +14,7 @@ import { ColorInput } from "./color-input";
 import { EpisodeCheck } from "./episodes";
 import { LibraryPicker } from "./library-picker";
 import type { Snapshot } from "./use-parlor";
+import { YoutubeAdder } from "./youtube-adder";
 
 type LineupProps = {
   state: ParlorState;
@@ -316,6 +317,7 @@ export function Lineup({ state, dispatch, onClose, history, onUndo, onRestore, f
               ) : null}
               <LibraryPicker verb="Make a station of" onPick={(ids, label) => createChannel(ids, label)} placeholder="A show, a film, a genre, a director, or part of a name" />
               <Suggestions channels={state.channels} onPick={takeSuggestion} onPickAll={takeAll} />
+              <YoutubeAdder className="mt-6 border-t border-screen pt-4" channels={state.channels} dispatch={dispatch} />
               <FreeChannels onOpen={onVintage} />
             </div>
           )}
@@ -472,6 +474,8 @@ function StationEditor({ channel, state, dispatch, conflict, setConflict, onStep
 
         {oneShow ? <EpisodeCheck show={channel.name} films={films} /> : null}
 
+        <SurfRow channel={channel} films={films} state={state} dispatch={dispatch} />
+
         <div className="rounded-xl bg-screen/60 p-3">
           <p className="mb-2 text-xs text-cream/55">Add to this station, or put back something you dropped</p>
           <LibraryPicker
@@ -515,6 +519,76 @@ function StationEditor({ channel, state, dispatch, conflict, setConflict, onStep
         </ul>
         {films.length > LIST_LIMIT ? <p className="mt-2 text-xs text-cream/45">and {films.length - LIST_LIMIT} more</p> : null}
       </div>
+    </div>
+  );
+}
+
+const SURF_PILLS: { value: SurfMode; label: string }[] = [
+  { value: "clock", label: "Clock" },
+  { value: "start", label: "Start of video" },
+  { value: "peaks", label: "Top moments" },
+];
+
+/**
+ * How a tune-in to this station lands, and "Surf the tube": the station spread out into one
+ * channel per video, each one a tune away, for flipping through a creator the way you flip
+ * through television. The station itself stays. Shown on YouTube stations and their children.
+ */
+function SurfRow({ channel, films, state, dispatch }: { channel: Channel; films: Film[]; state: ParlorState; dispatch: (action: ParlorAction) => void }) {
+  const parent = channel.parentId ? state.channels.find((item) => item.id === channel.parentId) : undefined;
+  if (!channel.youtube && !parent?.youtube && !films.some((film) => film.youtubeId)) return null;
+  const children = state.channels.filter((item) => item.parentId === channel.id);
+  const surf = channel.surf ?? "clock";
+
+  function expand() {
+    const now = Date.now();
+    dispatch({
+      type: "create-many",
+      now,
+      label: `Surfed ${channel.name} into ${films.length} channels`,
+      items: films.map((film, i) => ({
+        id: typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `ch-${now}-${i}`,
+        name: film.title.length > 60 ? `${film.title.slice(0, 59).trimEnd()}…` : film.title,
+        mode: "loop" as const,
+        mediaIds: [film.id],
+        surf: channel.surf ?? "start",
+        parentId: channel.id,
+        ...(channel.youtube ? { youtube: channel.youtube } : {}),
+      })),
+    });
+  }
+
+  return (
+    <div className="rounded-xl bg-screen/60 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="mr-1 text-xs text-cream/55">Surf</span>
+        {SURF_PILLS.map((item) => (
+          <button key={item.value} type="button" aria-pressed={surf === item.value} className={pill(surf === item.value)} onClick={() => dispatch({ type: "surf", id: channel.id, surf: item.value })}>
+            {item.label}
+          </button>
+        ))}
+      </div>
+      <p className="mt-2 text-xs text-cream/45">
+        Where a tune-in lands. Clock: wherever the station is, like broadcast. Start of video: a random point in the first tenth. Top moments: YouTube's most-replayed peaks, joined 15–30 s before the peak. S jumps to another video.
+      </p>
+      {channel.parentId ? null : (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {children.length > 0 ? (
+            <button
+              type="button"
+              className="h-9 rounded-full bg-room px-3 text-sm text-accent hover:bg-cream/10"
+              onClick={() => dispatch({ type: "delete-many", ids: children.map((item) => item.id), label: `Collapsed ${children.length} channels of ${channel.name}` })}
+            >
+              Collapse {children.length} channels
+            </button>
+          ) : (
+            <button type="button" className={pill(false)} disabled={films.length === 0} onClick={expand}>
+              Surf the tube: expand into {films.length} channels
+            </button>
+          )}
+          <span className="text-xs text-cream/45">{children.length > 0 ? "Each video of this station has a channel of its own." : "One channel per video, each a tune away. This station stays."}</span>
+        </div>
+      )}
     </div>
   );
 }

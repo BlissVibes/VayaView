@@ -19,6 +19,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pipeline } from "node:stream";
+import { createYoutube } from "./youtube.mjs";
 
 const VIDEO_EXT = new Set([".mp4", ".m4v", ".mkv", ".mov", ".webm", ".avi", ".wmv", ".mpg", ".mpeg", ".m2ts", ".flv"]);
 const SUB_EXT = new Set([".srt", ".vtt", ".ass", ".ssa"]);
@@ -716,6 +717,9 @@ export function createParlorHandler(options = {}) {
     });
   }
 
+  // ---------------------------------------------------------------- YouTube
+  const youtube = createYoutube({ dataDir, findTool, pool });
+
   // ---------------------------------------------------------------- TMDB
   // Genres, collections and directors, looked up once per title and kept in a file.
   // The token stays in its own file on this PC and is never sent to a phone.
@@ -1295,6 +1299,7 @@ export function createParlorHandler(options = {}) {
       }
     }
     if (url.pathname === "/api/status") return sendJson(res, 200, status);
+    if (await youtube.handle(req, res, url)) return;
 
     // Font files the user added, kept in Data\fonts.
     if (url.pathname === "/api/fonts" || url.pathname.startsWith("/api/fonts/file/")) {
@@ -1462,6 +1467,8 @@ export function createParlorHandler(options = {}) {
     if (!cookie || !config.tokens.includes(cookie)) return sendJson(res, 401, { error: "pair" });
     const pcOnly =
       /^\/api\/(phone|config|pick-folder|vintage|tmdb\/token|tmdb\/lookup|pair|update)/.test(url.pathname) ||
+      // yt-dlp runs on the PC's word only. A phone may read which videos the stations use, so its guide has their names.
+      (url.pathname.startsWith("/api/youtube") && !(url.pathname === "/api/youtube/library" && req.method === "GET")) ||
       (url.pathname === "/api/fonts" && req.method !== "GET") ||
       (url.pathname === "/api/store" && req.method !== "GET") ||
       (url.pathname === "/api/now" && req.method !== "GET");

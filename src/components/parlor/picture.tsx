@@ -9,6 +9,7 @@ import { streamCues, type Cue } from "@/lib/player/subs";
 import type { Airing, Channel } from "@/lib/schedule/types";
 import type { Film, SubTrack } from "@/lib/library/types";
 import { LiftFilter, videoFilter, type Adjust } from "./picture-adjust";
+import { YouTubeFrame } from "./youtube-frame";
 
 type PictureProps = {
   powered: boolean;
@@ -87,22 +88,33 @@ export function Picture(props: PictureProps) {
 
   const mediaId = powered && request && request.status === "ready" && request.filePath ? request.mediaId : null;
   const tuneKey = mediaId && channel && airing ? `${channel.id}:${mediaId}:${airing.cycleIndex}:${airing.slotIndex}` : null;
+  // A YouTube video plays in YouTube's own player. Everything below that opens a file (the stream, the
+  // keyframe question, subtitles, /media) sees no file, and stays out of it.
+  const youtubeId = mediaId && film?.youtubeId ? film.youtubeId : null;
+  /** YouTube refused this video (an error code from its player). Cleared by the next tune. */
+  const [ytError, setYtError] = useState<{ key: string; code: number } | null>(null);
+  const ytRefused = youtubeId && tuneKey && ytError?.key === tuneKey ? ytError.code : null;
+  // A phone cannot follow onto a YouTube station: the embed plays on the PC only.
+  const ytElsewhere = youtubeId != null && isRemote;
+  const fileId = youtubeId ? null : mediaId;
+  const fileTuneKey = youtubeId ? null : tuneKey;
   const burn = sub && !sub.text ? sub.key : null;
   const canCopy = film?.vcodec === "h264" || film?.vcodec === "hevc";
   // A phone never plays the file directly (an iPhone cannot open MKV); it starts at the copy step.
   const startLevel: Level = burn != null ? 2 : !isRemote && film?.direct !== false && audio === 0 ? 0 : canCopy ? 1 : 2;
-  const playKey = tuneKey ? `${tuneKey}:${audio}:${burn ?? ""}` : null;
+  const playKey = fileTuneKey ? `${fileTuneKey}:${audio}:${burn ?? ""}` : null;
   const level: Level = bump && bump.key === playKey && bump.level > startLevel ? bump.level : startLevel;
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     setFailed(false);
-    if (!playKey || !mediaId) {
+    if (!playKey || !fileId) {
       video.removeAttribute("src");
       video.load();
       return;
     }
+    const mediaId = fileId;
     let cancelled = false;
     const control = new AbortController();
     // Removed when this stream is replaced, so a late one can never seek the next stream (an ffmpeg
@@ -169,7 +181,7 @@ export function Picture(props: PictureProps) {
       control.abort();
       for (const once of onLoaded) video.removeEventListener("loadedmetadata", once);
     };
-  }, [playKey, mediaId, level, audio, burn, reload]);
+  }, [playKey, fileId, level, audio, burn, reload]);
 
   useEffect(() => {
     retries.current = 0;
@@ -219,7 +231,8 @@ export function Picture(props: PictureProps) {
   useEffect(() => {
     cuesRef.current = [];
     setLine("");
-    if (!mediaId || textSub == null) return;
+    if (!fileId || textSub == null) return;
+    const mediaId = fileId;
     const from = Math.max(0, offsetRef.current / 1000 - 15);
     const control = new AbortController();
     const url = `/subs/${mediaId}?s=${textSub}&t=${from.toFixed(1)}`;
@@ -239,7 +252,7 @@ export function Picture(props: PictureProps) {
       }
     })();
     return () => control.abort();
-  }, [tuneKey, mediaId, textSub, seekToken]);
+  }, [fileTuneKey, fileId, textSub, seekToken]);
 
   function onTime() {
     const video = videoRef.current;
@@ -272,6 +285,11 @@ export function Picture(props: PictureProps) {
     const value = Math.min(1, Math.max(0, Math.round(next * 100) / 100));
     setVolume(value);
     setVolumeShown(true);
+    // The YouTube frame takes its volume and mute from these two states.
+    if (youtubeRef.current) {
+      if (value > 0) setMuted(false);
+      return;
+    }
     const video = videoRef.current;
     if (!video) return;
     video.volume = value;
@@ -282,10 +300,19 @@ export function Picture(props: PictureProps) {
   }
   const changeRef = useRef(changeVolume);
   changeRef.current = changeVolume;
+  /** True while the YouTube frame is the player, for handlers set up once (the M key, the wheel). */
+  const youtubeRef = useRef(false);
+  youtubeRef.current = youtubeId != null && !ytElsewhere;
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.volume = volume;
   }, [volume, playKey]);
+
+  // Mute is one setting for both players: back on a file after a muted YouTube video, the file stays muted too.
+  useEffect(() => {
+    if (videoRef.current && playKey) videoRef.current.muted = muted;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only when the file changes; toggleMute sets it otherwise
+  }, [playKey]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => durable.setItem("parlor.volume", volume.toFixed(2)), 400);
@@ -311,6 +338,7 @@ export function Picture(props: PictureProps) {
   }, []);
 
   function toggleMute() {
+    if (youtubeRef.current) return setMuted((value) => !value);
     const video = videoRef.current;
     if (!video) return;
     video.muted = !video.muted;
@@ -332,7 +360,8 @@ export function Picture(props: PictureProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const live = mediaId != null && !failed;
+  const ytBroken = ytRefused != null || ytElsewhere;
+  const live = mediaId != null && !failed && !ytBroken;
   const showing = powered && !digits && airing != null && film != null && !missing && !failed;
   const hideCard = live && !digits && !notice && (compact || !card);
   const filter = adjust ? videoFilter(adjust) : undefined;
@@ -361,7 +390,7 @@ export function Picture(props: PictureProps) {
         ref={videoRef}
         playsInline
         onTimeUpdate={onTime}
-        className={cn("absolute inset-0 h-full w-full object-contain", filter ? "" : "bg-black", live ? "" : "hidden")}
+        className={cn("absolute inset-0 h-full w-full object-contain", filter ? "" : "bg-black", live && !youtubeId ? "" : "hidden")}
         style={filter ? { filter } : undefined}
         onError={() => {
           if (!playKey) return;
@@ -378,6 +407,21 @@ export function Picture(props: PictureProps) {
           else setFailed(true);
         }}
       />
+
+      {youtubeId && tuneKey && !ytElsewhere ? (
+        <YouTubeFrame
+          videoId={youtubeId}
+          offsetRef={offsetRef}
+          tuneKey={tuneKey}
+          seekToken={seekToken}
+          paused={paused}
+          muted={muted}
+          volume={volume}
+          onError={(code) => setYtError({ key: tuneKey, code })}
+          onAutoMuted={() => setMuted(true)}
+          className={ytRefused != null ? "hidden" : undefined}
+        />
+      ) : null}
 
       {live ? (
         <div
@@ -490,6 +534,23 @@ export function Picture(props: PictureProps) {
             </>
           ) : failed ? (
             <p className="text-sm text-accent">This file would not play, even through ffmpeg.</p>
+          ) : ytElsewhere ? (
+            <>
+              <h1 className="text-2xl leading-tight sm:text-4xl">{film.title}</h1>
+              <p className="mt-3 text-sm text-accent">YouTube stations play on the PC only.</p>
+            </>
+          ) : ytRefused != null ? (
+            <>
+              <h1 className="text-2xl leading-tight sm:text-4xl">{film.title}</h1>
+              <p className="mt-3 max-w-lg text-sm text-accent">
+                {ytRefused === 101 || ytRefused === 150
+                  ? `This video can't be embedded; YouTube only allows it on youtube.com (error ${ytRefused}).`
+                  : ytRefused === 100
+                    ? "This video has been removed from YouTube, or made private."
+                    : `YouTube would not play this video (error ${ytRefused}).`}
+                {airing.next ? ` Next is ${airing.next.title}.` : ""}
+              </p>
+            </>
           ) : null}
           {notice ? <p className="mt-4 text-sm text-accent">{notice}</p> : null}
         </div>

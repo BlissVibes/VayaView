@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { CATALOG, catalogById, diskMissingIds, libraryInfo } from "@/lib/library/catalog";
+import { CATALOG, catalogById, diskMissingIds, fillSchedule, libraryInfo, scheduleLibrary } from "@/lib/library/catalog";
 import { loadDiskLibrary } from "@/lib/library/disk";
 import { createFactoryState, refreshDiskState } from "@/lib/library/factory";
 import { parlorReducer, type ParlorAction } from "@/lib/library/reducer";
@@ -7,19 +7,15 @@ import type { ParlorState } from "@/lib/library/state";
 import { loadPersisted, savePersisted } from "@/lib/library/storage";
 import { playRequestFor, type PlayRequest } from "@/lib/player/seam";
 import { onNow } from "@/lib/schedule/engine";
-import type { Airing, Channel, Schedulable } from "@/lib/schedule/types";
+import type { Airing, Channel } from "@/lib/schedule/types";
 import type { Film } from "@/lib/library/types";
 import { durable } from "@/lib/durable";
 
 export type Overlay = "none" | "guide" | "lineup";
 
-/** What the schedule can place. Refilled in place after a rescan, so every reader sees the new library. */
-export const scheduleLibrary = new Map<string, Schedulable>();
-
-function fillSchedule() {
-  scheduleLibrary.clear();
-  for (const film of CATALOG) scheduleLibrary.set(film.id, { id: film.id, title: film.title, durationMs: film.durationMs });
-}
+// What the schedule can place. It lives beside the catalogue (so adding YouTube videos can refill it
+// without a reload) and is filled once here, after the library has loaded.
+export { scheduleLibrary };
 fillSchedule();
 
 export type RescanResult = { added: number; removed: number; error: string | null };
@@ -29,7 +25,7 @@ export type Snapshot = { label: string; channels: Channel[]; hiddenIds?: string[
 
 const HISTORY_LIMIT = 25;
 const EDITS = new Set<ParlorAction["type"]>([
-  "create", "create-many", "delete", "mode", "rename", "callsign", "number", "swap-number", "reorder", "shift", "restart", "remove-media", "set-media", "favorite", "color", "toggle-missing", "reset",
+  "create", "create-many", "delete", "delete-many", "surf", "mode", "rename", "callsign", "number", "swap-number", "reorder", "shift", "restart", "remove-media", "set-media", "favorite", "color", "toggle-missing", "reset",
 ]);
 
 /** One undo list per library, beside that library's saved stations. */
@@ -65,9 +61,13 @@ function describe(action: ParlorAction, state: ParlorState): string {
     case "create":
       return `Made ${action.name}`;
     case "create-many":
-      return action.items.length === 1 ? `Made ${action.items[0]?.name}` : `Made ${action.items.length} stations`;
+      return action.label ?? (action.items.length === 1 ? `Made ${action.items[0]?.name}` : `Made ${action.items.length} stations`);
     case "delete":
       return `Removed ${name(action.id)}`;
+    case "delete-many":
+      return action.label ?? (action.ids.length === 1 ? `Removed ${name(action.ids[0] ?? "")}` : `Removed ${action.ids.length} stations`);
+    case "surf":
+      return `Changed how ${name(action.id)} tunes in`;
     case "rename":
       return `Renamed ${name(action.id)}`;
     case "number":

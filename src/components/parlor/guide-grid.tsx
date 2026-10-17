@@ -76,6 +76,7 @@ export function GuideGrid({ channels, tunedId, now, missing, library, onTune, on
     tunedRow.current?.scrollIntoView({ block: "nearest" });
   }, [tunedId]);
 
+  const byId = new Map(channels.map((channel) => [channel.id, channel]));
   const ticks = Array.from({ length: WINDOW_MS / HALF_HOUR }, (_, i) => start + i * HALF_HOUR);
   const nowAt = ((now - start) / WINDOW_MS) * 100;
 
@@ -120,8 +121,10 @@ export function GuideGrid({ channels, tunedId, now, missing, library, onTune, on
       <div className="min-h-0 flex-1 overflow-y-auto">
         {rows.map(({ channel, slots }) => {
           const tuned = channel.id === tunedId;
+          // A channel "Surf the tube" made sits under its station: indented, and in the station's colour unless it has its own.
+          const parent = channel.parentId ? byId.get(channel.parentId) : undefined;
           // A station's own colour, or the theme highlight for a favourite that has none. Others stay plain.
-          const color = channel.color ?? (channel.favorite ? "var(--color-accent)" : null);
+          const color = channel.color ?? parent?.color ?? (channel.favorite ? "var(--color-accent)" : null);
           return (
             <div
               key={channel.id}
@@ -147,8 +150,11 @@ export function GuideGrid({ channels, tunedId, now, missing, library, onTune, on
                 <p className={cn("font-title w-9 text-xl leading-none font-semibold tracking-tight tabular-nums", tuned ? "text-cream" : "text-cream/80")}>
                   {formatStation(channel.number)}
                 </p>
-                <div className="min-w-0 flex-1">
-                  <p className={cn("truncate text-sm text-cream", tuned ? "font-semibold" : "")}>{channel.name}</p>
+                <div className={cn("min-w-0 flex-1", channel.parentId ? "pl-3" : "")}>
+                  <p className={cn("truncate text-sm text-cream", tuned ? "font-semibold" : "")}>
+                    {channel.parentId ? <span className="mr-1 text-cream/45">↳</span> : null}
+                    {channel.name}
+                  </p>
                   <p className="text-[0.65rem] tracking-[0.16em] text-cream/40">{channel.callSign}</p>
                 </div>
                 {narrow ? null : (

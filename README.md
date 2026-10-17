@@ -38,6 +38,27 @@ Desktop app for Windows and macOS (Electron). Plays your files with the help of 
 - Watch on an iPhone over home Wi-Fi, following what the PC is showing (off unless switched on, PIN-paired)
 - Themes, custom colours, and your own fonts
 
+## YouTube stations
+
+Stations can also be made of a YouTuber's videos: Edit stations › New station › **YouTube**. Type a
+name, @handle or channel link, pick the creator, then tick the kinds of station their videos make
+(everything they upload, their long videos, compilations other people cut from them, each playlist).
+One click makes them all; their side channels (vlogs, music, clips) are offered after. Jerma985,
+Corridor Digital and Pokelawls are there as one-click starters.
+
+- The videos play in **YouTube's own player**, inside the picture. Nothing is downloaded, and they
+  need the Internet. YouTube stations play on the PC only, not on a phone.
+- Finding videos (and each video's most-replayed moments) needs **yt-dlp** on the PC:
+  `brew install yt-dlp` on a Mac, `winget install yt-dlp` on Windows. Settings › Surfing says
+  whether it is there.
+- **Surf modes** (in each station's editor) say where a tune-in lands: *Clock* (wherever the station
+  is, like broadcast), *Start of video* (a random point in the first tenth), or *Top moments* (one of
+  YouTube's most-replayed peaks, joined 15–30 s before it). **S** jumps to another video of the
+  station at its surf point. *Surf the tube* spreads a station into one channel per video.
+- **Between channel flips** (Settings › Surfing): stations keep running while you are away
+  (the default), or YouTube stations (or every station) wait and resume where you left them, for up
+  to six hours. Back to Live always joins the station's clock.
+
 ## Building
 
 ```bash

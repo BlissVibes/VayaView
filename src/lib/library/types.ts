@@ -40,4 +40,6 @@ export type Film = {
   absolute?: boolean;
   audio?: AudioTrack[];
   subs?: SubTrack[];
+  /** A YouTube video, played in YouTube's own embedded player. Never on disk; `filePath` is a "youtube:" stand-in. */
+  youtubeId?: string;
 };

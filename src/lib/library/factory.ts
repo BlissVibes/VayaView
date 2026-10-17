@@ -29,6 +29,9 @@ function smartChannel(args: {
   };
 }
 
+/** The catalogue without its YouTube videos: what is on this computer. */
+const onDiskFilms = () => CATALOG.filter((entry) => !entry.youtubeId);
+
 /** Disk stations have been on the air since New Year, so the first tune joins mid-film. */
 export const DISK_ANCHOR = Date.UTC(2026, 0, 1);
 
@@ -61,9 +64,11 @@ function createDiskState(): ParlorState {
     });
   };
   const ids = (films: typeof CATALOG) => films.map((entry) => entry.id);
+  // YouTube videos are in the catalogue too, but they are not this computer's files: they only air on stations made from them.
+  const local = onDiskFilms();
 
-  const movies = CATALOG.filter((entry) => entry.genres.includes("Movie"));
-  const episodes = CATALOG.filter((entry) => entry.genres.includes("TV"));
+  const movies = local.filter((entry) => entry.genres.includes("Movie"));
+  const episodes = local.filter((entry) => entry.genres.includes("TV"));
   add("movies", "Movies", "shuffle", ids(movies));
   add("tv", "TV Mix", "shuffle", ids(episodes));
 
@@ -87,10 +92,10 @@ function createDiskState(): ParlorState {
     add(`show-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, name, "loop", shows.get(name) ?? []);
   }
 
-  const shorts = CATALOG.filter((entry) => entry.genres.includes("Short"));
+  const shorts = local.filter((entry) => entry.genres.includes("Short"));
   if (shorts.length >= 4) add("shorts", "Shorts & Extras", "shuffle", ids(shorts));
 
-  if (channels.length === 0) add("all", "Everything", "shuffle", ids(CATALOG), 1);
+  if (channels.length === 0) add("all", "Everything", "shuffle", ids(local), 1);
   return { channels, missingIds: [], tunedId: channels[0]?.id ?? "", lastId: null, powered: true };
 }
 
@@ -150,7 +155,7 @@ export function refreshDiskState(saved: ParlorState): ParlorState {
   const channels = [...kept, ...custom].map((channel) => {
     // The first station is made before the first scan has finished on a slow disk, so it can be
     // saved empty. Untouched, it means "everything": fill it from today's disk.
-    if (channel.id === `${AUTO}all` && channel.mediaIds.length === 0 && !channel.edited) return { ...channel, mediaIds: CATALOG.map((film) => film.id) };
+    if (channel.id === `${AUTO}all` && channel.mediaIds.length === 0 && !channel.edited) return { ...channel, mediaIds: onDiskFilms().map((film) => film.id) };
     return channel;
   });
   if (channels.length === 0) return saved;
@@ -176,7 +181,7 @@ export function createFactoryState(): ParlorState {
       mode: "shuffle",
       shuffleSeed: `${AUTO}all`,
       anchorMs: DISK_ANCHOR,
-      mediaIds: CATALOG.map((film) => film.id),
+      mediaIds: onDiskFilms().map((film) => film.id),
       query: null,
     };
     return { channels: [{ ...channel, number: 2 }], missingIds: [], tunedId: channel.id, lastId: null, powered: true };

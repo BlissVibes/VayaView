@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { loadFlipPause, saveFlipPause, type FlipPause } from "@/lib/flip-pause";
 import { applyFonts, fileFamily, loadFonts, type FontChoice, type FontPick } from "@/lib/fonts";
 import { LibraryBar } from "./library-bar";
 import { PhoneAccess } from "./phone-access";
 import { ThemePicker } from "./theme-picker";
 import { TmdbBox } from "./tmdb-box";
 import { VintageTv } from "./vintage-tv";
+import { useYtdlp, YtdlpLine } from "./youtube-adder";
 
 type SettingsProps = {
   /** Open straight into Vintage TV with this archive.org search (a free channel picked under Edit stations). */
@@ -59,6 +61,9 @@ export function Settings({ onClose, onRescan, scanLabel, onRefresh, vintageQuery
           </button>
           <TmdbBox onRefresh={onRefresh} />
         </Section>
+        <Section title="Surfing">
+          <Surfing />
+        </Section>
         <Section title="Phone">
           <PhoneAccess />
         </Section>
@@ -72,6 +77,47 @@ export function Settings({ onClose, onRescan, scanLabel, onRefresh, vintageQuery
         </Section>
       </div>
     </section>
+  );
+}
+
+const FLIP_CHOICES: { value: FlipPause; label: string; note: string }[] = [
+  { value: "continuous", label: "Continuous", note: "The station keeps running while you are away, like broadcast." },
+  { value: "youtube", label: "Pause YouTube stations while away", note: "Come back and the video resumes where you left it." },
+  { value: "all", label: "Pause every station while away", note: "Every station, your files too, waits for you (up to six hours)." },
+];
+
+/** Between channel flips: whether a station runs on while you are elsewhere, and whether yt-dlp is there to find YouTube videos. */
+function Surfing() {
+  const [flip, setFlip] = useState<FlipPause>(loadFlipPause);
+  const ytdlp = useYtdlp();
+  return (
+    <div className="space-y-3 text-xs">
+      <fieldset>
+        <legend className="mb-1.5 text-cream/70">Between channel flips, YouTube stations…</legend>
+        <div className="space-y-1">
+          {FLIP_CHOICES.map((choice) => (
+            <label key={choice.value} className="flex items-start gap-2">
+              <input
+                type="radio"
+                name="flip-pause"
+                checked={flip === choice.value}
+                onChange={() => {
+                  setFlip(choice.value);
+                  saveFlipPause(choice.value);
+                }}
+                className="mt-0.5 accent-accent"
+              />
+              <span>
+                <span className="text-cream">{choice.label}</span>
+                <span className="block text-cream/50">{choice.note}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+      <p className="text-cream/50">Back to Live always joins the station's clock. S on a station with a surf mode jumps to another of its videos.</p>
+      <YtdlpLine ytdlp={ytdlp} />
+    </div>
   );
 }
 

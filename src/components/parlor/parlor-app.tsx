@@ -3,7 +3,8 @@ import { cn } from "@/lib/cn";
 import { formatDuration, formatStation, formatTime } from "@/lib/format";
 import type { Film } from "@/lib/library/types";
 import { playRequestFor } from "@/lib/player/seam";
-import type { Airing } from "@/lib/schedule/types";
+import { surfOffset, type Peak } from "@/lib/player/surf";
+import type { Airing, Channel } from "@/lib/schedule/types";
 import { catalogById } from "@/lib/library/catalog";
 import { isRemote } from "@/lib/remote";
 import { GuideGrid } from "./guide-grid";
@@ -16,6 +17,7 @@ import { TrackMenu, useTracks } from "./tracks";
 import { PictureMenu, usePictureAdjust } from "./picture-adjust";
 import { scheduleLibrary, useParlor } from "./use-parlor";
 import { durable } from "@/lib/durable";
+import { loadFlipPause } from "@/lib/flip-pause";
 
 const buttonClass = "rounded-md bg-cream/10 px-3 py-1.5 text-xs text-cream hover:bg-cream/20";
 /** The everyday buttons (Last, Full view, Edit stations): heavier, so they stand out from the rest. */
@@ -34,6 +36,38 @@ type Held = {
   /** Set while the viewer has the picture stopped: the offset it is stopped at. The station's clock runs on regardless. */
   pausedMs?: number;
 };
+
+/** Where the viewer left a station, kept while they are on another one (Settings › Surfing). */
+type Position = { airing: Airing; film: Film; offsetMs: number; at: number };
+
+/** A position older than this is forgotten: coming back the next evening joins the clock again. */
+const POSITION_MAX_AGE_MS = 6 * 60 * 60_000;
+/** A position this near the end of its programme is not worth going back to. */
+const POSITION_END_MS = 5000;
+
+/** Each YouTube video's most-replayed peaks, fetched once per run. A video with no curve is kept as an empty list. */
+const peakCache = new Map<string, Peak[]>();
+const peakAsked = new Map<string, Promise<Peak[] | null>>();
+
+/** The peaks of one video, from the cache or from yt-dlp (two to five seconds the first time). Null when it could not be asked. */
+function fetchPeaks(videoId: string): Promise<Peak[] | null> {
+  const known = peakCache.get(videoId);
+  if (known) return Promise.resolve(known);
+  const asking = peakAsked.get(videoId);
+  if (asking) return asking;
+  const ask = fetch(`/api/youtube/video/${encodeURIComponent(videoId)}`)
+    .then((response) => (response.ok ? (response.json() as Promise<{ peaks?: Peak[] }>) : null))
+    .then((body) => {
+      if (!body) return null;
+      const peaks = Array.isArray(body.peaks) ? body.peaks : [];
+      peakCache.set(videoId, peaks);
+      return peaks;
+    })
+    .catch(() => null)
+    .finally(() => peakAsked.delete(videoId));
+  peakAsked.set(videoId, ask);
+  return ask;
+}
 
 /**
  * Two views of one set. The guide keeps the picture playing in the corner
@@ -77,8 +111,11 @@ export function ParlorApp() {
       if (hide != null) window.clearTimeout(hide);
     };
   }, []);
-  /** A station made of this computer's files. Free stations (to come) will carry a different id. */
-  const isLocal = (item: (typeof state.channels)[number]) => !item.id.startsWith("free-");
+  // A YouTube station (or a channel "Surf the tube" made from one) is not this computer's files: it shows under Free TV.
+  const byId = new Map(state.channels.map((item) => [item.id, item]));
+  const isYoutube = (item: Channel) => item.youtube != null || (item.parentId != null && byId.get(item.parentId)?.youtube != null);
+  /** A station made of this computer's files. Free stations (to come) will carry a different id; YouTube ones carry `youtube`. */
+  const isLocal = (item: Channel) => !item.id.startsWith("free-") && !isYoutube(item);
   const shownChannels = source === "all" ? state.channels : state.channels.filter((item) => (source === "local" ? isLocal(item) : !isLocal(item)));
   // A newer version on GitHub puts a dot on the Settings button.
   const [updateReady, setUpdateReady] = useState(false);
@@ -128,6 +165,67 @@ export function ParlorApp() {
   const [seekToken, setSeekToken] = useState(0);
   const live = parlor.airing;
 
+  // Tune-ins. Two things can move where a tune lands, off the station's clock: a position kept from
+  // the last visit (Settings › Surfing pauses stations while away), and the station's surf mode
+  // (start of a video, or its most-replayed moments). Both land through `held`, like a scrub, so
+  // Back to Live always drops onto the clock. Worked out during the render that sees the new
+  // station, so the picture opens at the landing point and is never sent to the clock first.
+  const positions = useRef(new Map<string, Position>());
+  /** What the picture showed in the last render: the programme being left when the station changes. */
+  const shownRef = useRef<{ channelId: string; airing: Airing; film: Film } | null>(null);
+  const latest = useRef({ tunedId: state.tunedId, held, liveKey: "" });
+  const airingKey = (item: Airing | null) => (item ? `${item.channelId}:${item.slot.mediaId}:${item.cycleIndex}:${item.slotIndex}` : "");
+
+  /** Land on `airing` at its surf point. Null means the clock. For "peaks" with no curve yet, the clock now and the peak once it is known. */
+  function surfLanding(on: Channel, airing: Airing, film: Film, fallback: "clock" | "start" = "clock"): Held | null {
+    const mode = on.surf && on.surf !== "clock" ? on.surf : fallback;
+    const length = airing.slot.durationMs;
+    const hold = (offset: number | null): Held | null => (offset == null ? null : { channelId: on.id, airing, film, startMs: Date.now() - offset });
+    if (mode !== "peaks" || !film.youtubeId) return hold(surfOffset(length, mode === "peaks" ? "start" : mode, null));
+    const known = peakCache.get(film.youtubeId);
+    if (known) return hold(surfOffset(length, "peaks", known));
+    const key = airingKey(airing);
+    void fetchPeaks(film.youtubeId).then((peaks) => {
+      const seen = latest.current;
+      // Only if the viewer is still on this programme, and has not scrubbed or surfed since.
+      if (seen.tunedId !== on.id) return;
+      if (seen.held ? seen.held.airing !== airing || seen.held.pausedMs != null : seen.liveKey !== key) return;
+      const landing = hold(surfOffset(length, "peaks", peaks ?? []));
+      if (!landing) return;
+      setHeld(landing);
+      setSeekToken((value) => value + 1);
+    });
+    // Meanwhile: the clock for a tune-in, the start of the video for a surf.
+    return fallback === "start" ? hold(surfOffset(length, "start", null)) : null;
+  }
+
+  const [tunedSeen, setTunedSeen] = useState(state.tunedId);
+  if (tunedSeen !== state.tunedId) {
+    setTunedSeen(state.tunedId);
+    // A phone follows the PC's picture, held position and all, so it lands nowhere of its own.
+    if (!isRemote) {
+      const setting = loadFlipPause();
+      const away = shownRef.current;
+      if (away && away.channelId !== state.tunedId && setting !== "continuous") {
+        const left = byId.get(away.channelId);
+        if (setting === "all" || left?.youtube != null || away.film.youtubeId) {
+          positions.current.set(away.channelId, { airing: away.airing, film: away.film, offsetMs: away.airing.offsetMs, at: Date.now() });
+        }
+      }
+      let landing: Held | null = null;
+      if (channel && live && parlor.film && live.slot.status === "ready") {
+        const stored = positions.current.get(channel.id);
+        positions.current.delete(channel.id);
+        if (stored && Date.now() - stored.at < POSITION_MAX_AGE_MS && stored.offsetMs < stored.airing.slot.durationMs - POSITION_END_MS) {
+          landing = { channelId: channel.id, airing: stored.airing, film: stored.film, startMs: Date.now() - stored.offsetMs };
+        } else {
+          landing = surfLanding(channel, live, parlor.film);
+        }
+      }
+      setHeld(landing);
+    }
+  }
+
   // What the picture shows: the station's clock, unless the viewer is holding a scrubbed programme.
   let airing = live;
   let film = parlor.film;
@@ -143,6 +241,8 @@ export function ParlorApp() {
     }
   }
   const request = airing ? playRequestFor(airing, film) : null;
+  shownRef.current = channel && airing && film && state.powered ? { channelId: channel.id, airing, film } : null;
+  latest.current = { tunedId: state.tunedId, held, liveKey: airingKey(live) };
   const tracks = useTracks(film);
   const picture = usePictureAdjust(film);
 
@@ -201,7 +301,39 @@ export function ParlorApp() {
   }, [follow]);
 
   function goLive() {
+    if (channel) positions.current.delete(channel.id);
     setHeld(null);
+    setSeekToken((value) => value + 1);
+  }
+
+  /**
+   * Surf (S): another video of this station, at its surf point. A station of one video lands on
+   * another moment of it instead. Like a scrub it is a look, not an edit; Back to Live drops onto the clock.
+   */
+  function surf() {
+    if (!channel || !state.powered || now == null) return;
+    const current = airing?.slot.mediaId;
+    const playable = channel.mediaIds
+      .map((mediaId, slotIndex) => ({ mediaId, slotIndex, entry: scheduleLibrary.get(mediaId), film: catalogById.get(mediaId) }))
+      .filter((item) => item.entry && item.film && item.entry.durationMs > 0 && !parlor.missing.has(item.mediaId));
+    if (playable.length === 0) return;
+    const others = playable.filter((item) => item.mediaId !== current);
+    const pick = (others.length > 0 ? others : playable)[Math.floor(Math.random() * (others.length > 0 ? others : playable).length)]!;
+    const durationMs = pick.entry!.durationMs;
+    const synthetic: Airing = {
+      channelId: channel.id,
+      cycleIndex: -1,
+      slotIndex: pick.slotIndex,
+      offsetMs: 0,
+      remainingMs: durationMs,
+      startedAtMs: now,
+      endsAtMs: now + durationMs,
+      slot: { mediaId: pick.mediaId, title: pick.entry!.title, durationMs, status: "ready" },
+      next: null,
+    };
+    const landing = surfLanding(channel, synthetic, pick.film!, "start");
+    if (!landing) return;
+    setHeld(landing);
     setSeekToken((value) => value + 1);
   }
 
@@ -229,8 +361,8 @@ export function ParlorApp() {
     setHeld({ channelId: channel.id, airing: held?.channelId === channel.id ? held.airing : airing, film, startMs: Date.now() - at, pausedMs: at });
   }
 
-  const seekRef = useRef({ seekTo, togglePause, offset: 0 });
-  seekRef.current = { seekTo, togglePause, offset: airing?.offsetMs ?? 0 };
+  const seekRef = useRef({ seekTo, togglePause, surf, offset: 0 });
+  seekRef.current = { seekTo, togglePause, surf, offset: airing?.offsetMs ?? 0 };
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target;
@@ -238,6 +370,7 @@ export function ParlorApp() {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === "ArrowLeft") seekRef.current.seekTo(seekRef.current.offset - 10_000);
       if (event.key === "ArrowRight") seekRef.current.seekTo(seekRef.current.offset + 30_000);
+      if ((event.key === "s" || event.key === "S") && !isRemote) seekRef.current.surf();
       if (event.key === " " || event.key === "k" || event.key === "K") {
         // Space would also press whatever button was last clicked, and scroll the guide. Neither is wanted.
         event.preventDefault();
@@ -307,6 +440,7 @@ export function ParlorApp() {
         onLive={goLive}
         paused={paused}
         onPause={togglePause}
+        onSurf={!isRemote && channel?.surf && channel.surf !== "clock" ? surf : undefined}
       />
     ) : null;
 
@@ -348,7 +482,9 @@ export function ParlorApp() {
             {tab("local", "Local")}
             {tab("free", "Free TV")}
           </div>
-          <span className="ml-3 text-xs text-cream/40">{source === "free" ? "Streamed from the Internet Archive · coming soon" : `${shownChannels.length} stations`}</span>
+          <span className="ml-3 text-xs text-cream/40">
+            {source === "free" && shownChannels.length === 0 ? "Streamed from the Internet Archive · coming soon" : `${shownChannels.length} stations`}
+          </span>
           <button
             type="button"
             className={cn("ml-auto rounded-md px-3 py-1 text-xs tracking-wide uppercase", settingsOpen ? "bg-cream text-room" : "text-cream/70 hover:bg-cream/10 hover:text-cream")}
@@ -494,7 +630,7 @@ export function ParlorApp() {
                 </>
                 )}
               </div>
-              <p className="mt-2 hidden text-xs text-cream/35 xl:block">↑↓ station · Backspace last · Space pause · ←→ scrub · G full view · F full screen · M mute</p>
+              <p className="mt-2 hidden text-xs text-cream/35 xl:block">↑↓ station · Backspace last · Space pause · ←→ scrub · S surf · G full view · F full screen · M mute</p>
               {!isRemote && state.channels.length <= 1 && !editing ? (
                 <p className="mt-2 text-xs text-accent/90">
                   One station so far. <button type="button" className="underline hover:text-accent" onClick={() => { setEditId(null); setSettingsOpen(false); parlor.setOverlay("lineup"); }}>Edit stations</button> suggests more from your library: shows, genres, franchises, decades.

@@ -78,9 +78,11 @@ export function suggestStations(catalog: readonly Film[], existing: readonly Cha
     out.push({ key: `${slug(group)}-${slug(key)}`, group, name, mode, mediaIds, note: note ?? plural(films.length, "film") });
   };
 
-  const movies = catalog.filter((film) => film.genres[0] === "Movie");
-  const episodes = catalog.filter((film) => film.genres[0] === "TV");
-  const shorts = catalog.filter((film) => film.genres[0] === "Short");
+  // YouTube videos (genres[0] "YouTube") are never counted as films, shows or shorts: they get their own stations.
+  const local = catalog.filter((film) => !film.youtubeId);
+  const movies = local.filter((film) => film.genres[0] === "Movie");
+  const episodes = local.filter((film) => film.genres[0] === "TV");
+  const shorts = local.filter((film) => film.genres[0] === "Short");
   const ids = (films: readonly Film[]) => films.map((film) => film.id);
 
   // Starters: the whole library cut in two, plus the odds and ends.
