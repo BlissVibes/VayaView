@@ -44,10 +44,16 @@ npm install
 npm run release
 ```
 
-`npm run dev` runs the interface in a browser for development. `npm run package` builds
-`VayaView\VayaView.exe`; `npm run release` also zips it into `releases\` for a GitHub release.
+`npm run dev` runs the interface in a browser for development; `npm run app` runs the real Electron
+shell against the built interface. `npm run package` builds the app for the system you are on:
+`VayaView\VayaView.exe` on Windows, `releases/mac/VayaView-darwin-{arm64,x64}/VayaView.app` on a Mac.
+`npm run release` also zips it into `releases/` for a GitHub release (on a Mac the apps are ad-hoc
+signed and zipped with `ditto`, so the bundle's symlinks survive).
 
-The Mac app is built by GitHub, not on Windows: when a release is published,
+Building on a Mac needs Node 22 or newer and ffmpeg (`brew install ffmpeg`); nothing else. The tests
+run with `npm test`.
+
+The Mac app can also be built by GitHub when releasing from Windows: when a release is published,
 `.github/workflows/mac-release.yml` builds `VayaView.app` on a Mac runner (`node scripts/package.mjs --mac`),
 ad-hoc signs it, and attaches `VayaView-darwin-arm64.zip` and `VayaView-darwin-x64.zip` to the release.
 It can also be run by hand from the Actions tab with a release tag.

@@ -1,5 +1,8 @@
-// Builds D:\SelfTV\VayaView\VayaView.exe and clears every older copy. Run with: npm run package
-// The app's saved data is in D:\SelfTV\Data and is never touched here.
+// Builds the app for the system this runs on. Run with: npm run package
+//   Windows: D:\SelfTV\VayaView\VayaView.exe, clearing every older copy.
+//   Mac:     releases/mac/VayaView-darwin-{arm64,x64}/VayaView.app (the same as --mac).
+// Pass --win on a Mac to cross-build the Windows exe instead (needs Wine for the icon).
+// The app's saved data (D:\SelfTV\Data, ~/Library/Application Support/VayaView/Data) is never touched here.
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -14,7 +17,8 @@ const shipOnly = (otherIcon) => (file) => file !== "" && (file.endsWith(otherIco
 // --mac builds VayaView.app for Apple Silicon and Intel into releases\mac. It must run on a Mac:
 // the app has to be signed there, and its framework is full of symlinks Windows cannot make.
 // GitHub does it for each release (.github/workflows/mac-release.yml).
-if (process.argv.includes("--mac")) {
+const buildMac = process.argv.includes("--mac") || (process.platform === "darwin" && !process.argv.includes("--win"));
+if (buildMac) {
   if (process.platform !== "darwin") throw new Error("Build the Mac app on a Mac (or let the mac-release workflow do it).");
   const out = path.resolve("releases", "mac");
   fs.rmSync(out, { recursive: true, force: true });
