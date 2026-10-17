@@ -9,6 +9,12 @@ import os from "node:os";
 import path from "node:path";
 import { packager } from "@electron/packager";
 
+// The app ships a TMDB token so nobody has to make an account for genres. It comes from
+// server/tmdb-key.json, or is written there now from VAYAVIEW_TMDB_TOKEN (the Mac workflow's secret).
+const keyFile = path.resolve("server", "tmdb-key.json");
+if (!fs.existsSync(keyFile) && (process.env.VAYAVIEW_TMDB_TOKEN ?? "").trim()) fs.writeFileSync(keyFile, JSON.stringify({ token: process.env.VAYAVIEW_TMDB_TOKEN.trim() }));
+if (!fs.existsSync(keyFile)) console.warn("No TMDB token packaged (server/tmdb-key.json or VAYAVIEW_TMDB_TOKEN). Users will need to paste their own under Settings.");
+
 const keep = ["electron", "server", "dist-web", "package.json"];
 // Only the shell, the backend, and the built UI ship. Everything is bundled, so no node_modules.
 // Each build also leaves out the other system's icon file.

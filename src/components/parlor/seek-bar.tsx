@@ -11,6 +11,9 @@ type SeekBarProps = {
   behindMs: number | null;
   onSeek: (ms: number) => void;
   onLive: () => void;
+  /** The picture is stopped on this frame. The station's clock keeps running underneath. */
+  paused?: boolean;
+  onPause?: () => void;
   className?: string;
 };
 
@@ -31,7 +34,7 @@ const stepClass = "rounded-md bg-cream/10 px-2 py-1 text-xs text-cream hover:bg-
  * Scrubbing is a look, not an edit. The station's clock keeps running
  * underneath, nothing here is saved, and Live always drops back onto it.
  */
-export function SeekBar({ offsetMs, durationMs, shifted, behindMs, onSeek, onLive, className }: SeekBarProps) {
+export function SeekBar({ offsetMs, durationMs, shifted, behindMs, onSeek, onLive, paused = false, onPause, className }: SeekBarProps) {
   // While the thumb is held, show where it is without restarting the picture on every pixel.
   const [drag, setDrag] = useState<number | null>(null);
   const at = drag ?? offsetMs;
@@ -65,6 +68,11 @@ export function SeekBar({ offsetMs, durationMs, shifted, behindMs, onSeek, onLiv
         className="h-1.5 w-full cursor-pointer accent-accent"
       />
       <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-cream/70 tabular-nums">
+        {onPause ? (
+          <button type="button" className={cn(stepClass, paused && "bg-accent text-room hover:bg-accent")} onClick={onPause} aria-pressed={paused} title={paused ? "Play (Space)" : "Pause (Space)"}>
+            {paused ? "▶ Play" : "❚❚ Pause"}
+          </button>
+        ) : null}
         <span>
           {clock(at)} / {clock(durationMs)}
         </span>
@@ -74,7 +82,7 @@ export function SeekBar({ offsetMs, durationMs, shifted, behindMs, onSeek, onLiv
         <button type="button" className={stepClass} onClick={() => onSeek(offsetMs + 30_000)} title="Forward 30 seconds (→)">
           +30s
         </button>
-        <span className="ml-auto">{shifted ? where : ""}</span>
+        <span className="ml-auto">{paused ? `Paused · ${where}` : shifted ? where : ""}</span>
         <button
           type="button"
           onClick={onLive}

@@ -13,7 +13,8 @@ Desktop app for Windows and macOS (Electron). Plays your files with the help of 
   folder (for example `D:\SelfTV\Data`).
 - **Update:** Settings → Updates → *Update to …*. The new version replaces the old one in place, so there
   is only ever one copy.
-- **Needs:** ffmpeg and ffprobe on the PATH (`winget install Gyan.FFmpeg`).
+- **Needs:** ffmpeg and ffprobe on the PATH (`winget install Gyan.FFmpeg`). Genres, franchises and directors
+  come from TMDB with a token built into the app; your own token (Settings › Library) replaces it if you like.
 
 ### On a Mac
 
@@ -52,6 +53,10 @@ signed and zipped with `ditto`, so the bundle's symlinks survive).
 
 Building on a Mac needs Node 22 or newer and ffmpeg (`brew install ffmpeg`); nothing else. The tests
 run with `npm test`.
+
+To ship a TMDB token inside the app (so users get genres without making an account), save one as
+`server/tmdb-key.json` (copy `server/tmdb-key.example.json`) or set `VAYAVIEW_TMDB_TOKEN` when packaging.
+The file is ignored by git. The Mac workflow reads it from a repository secret named `TMDB_TOKEN`.
 
 The Mac app can also be built by GitHub when releasing from Windows: when a release is published,
 `.github/workflows/mac-release.yml` builds `VayaView.app` on a Mac runner (`node scripts/package.mjs --mac`),

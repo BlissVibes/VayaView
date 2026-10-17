@@ -7,7 +7,7 @@ import type { Airing } from "@/lib/schedule/types";
 import { catalogById } from "@/lib/library/catalog";
 import { isRemote } from "@/lib/remote";
 import { GuideGrid } from "./guide-grid";
-import { Lineup } from "./lineup";
+import { FreeChannels, Lineup } from "./lineup";
 import { Picture } from "./picture";
 import { SeekBar } from "./seek-bar";
 import { StationMenu } from "./station-menu";
@@ -26,7 +26,14 @@ const primaryClass = "rounded-md bg-cream/20 px-3 py-1.5 text-xs font-semibold t
  * start time, held here and nowhere else: not saved, not in the schedule.
  * Changing channel, reaching the end, or pressing Live lets go of it.
  */
-type Held = { channelId: string; airing: Airing; film: Film; startMs: number };
+type Held = {
+  channelId: string;
+  airing: Airing;
+  film: Film;
+  startMs: number;
+  /** Set while the viewer has the picture stopped: the offset it is stopped at. The station's clock runs on regardless. */
+  pausedMs?: number;
+};
 
 /**
  * Two views of one set. The guide keeps the picture playing in the corner
@@ -37,6 +44,42 @@ export function ParlorApp() {
   const parlor = useParlor();
   const { state, channel, now } = parlor;
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** An archive.org search to open Settings › Vintage TV on (a free channel picked under Edit stations). */
+  const [vintageQuery, setVintageQuery] = useState<string | null>(null);
+
+  // The source bar: a strip along the top that shows when the pointer goes there. All stations,
+  // the ones from this computer's files, or the free ones to come from the Internet Archive.
+  type Source = "all" | "local" | "free";
+  const [source, setSource] = useState<Source>("all");
+  const [barShown, setBarShown] = useState(false);
+  const barHover = useRef(false);
+  useEffect(() => {
+    if (isRemote) return;
+    let hide: number | null = null;
+    const onMove = (event: MouseEvent) => {
+      if (event.clientY <= 36 || barHover.current) {
+        if (hide != null) window.clearTimeout(hide);
+        hide = null;
+        setBarShown(true);
+      } else if (hide == null) {
+        hide = window.setTimeout(() => {
+          hide = null;
+          if (!barHover.current) setBarShown(false);
+        }, 700);
+      }
+    };
+    const onLeave = () => setBarShown(false);
+    window.addEventListener("mousemove", onMove);
+    document.documentElement.addEventListener("mouseleave", onLeave);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      document.documentElement.removeEventListener("mouseleave", onLeave);
+      if (hide != null) window.clearTimeout(hide);
+    };
+  }, []);
+  /** A station made of this computer's files. Free stations (to come) will carry a different id. */
+  const isLocal = (item: (typeof state.channels)[number]) => !item.id.startsWith("free-");
+  const shownChannels = source === "all" ? state.channels : state.channels.filter((item) => (source === "local" ? isLocal(item) : !isLocal(item)));
   // A newer version on GitHub puts a dot on the Settings button.
   const [updateReady, setUpdateReady] = useState(false);
   useEffect(() => {
@@ -91,7 +134,7 @@ export function ParlorApp() {
   let shifted = false;
   if (held && channel && held.channelId === channel.id && state.powered && now != null) {
     const length = held.airing.slot.durationMs;
-    const offset = now - held.startMs;
+    const offset = held.pausedMs ?? now - held.startMs;
     if (offset < length - 1000) {
       const at = Math.max(0, offset);
       airing = { ...held.airing, offsetMs: at, remainingMs: length - at, startedAtMs: held.startMs, endsAtMs: held.startMs + length };
@@ -107,12 +150,14 @@ export function ParlorApp() {
     if (held && !shifted && now != null) setHeld(null);
   }, [held, shifted, now]);
 
+  const paused = shifted && held?.pausedMs != null;
+
   const sameProgramme =
     live != null && airing != null && live.slot.mediaId === airing.slot.mediaId && live.slotIndex === airing.slotIndex && live.cycleIndex === airing.cycleIndex;
   const behindMs = shifted && sameProgramme && live && airing ? live.offsetMs - airing.offsetMs : null;
 
   // The PC tells the house what it is showing. A following phone reads it every two seconds.
-  const nowKey = `${state.tunedId}|${state.powered}|${held?.startMs ?? ""}|${held?.channelId ?? ""}`;
+  const nowKey = `${state.tunedId}|${state.powered}|${held?.startMs ?? ""}|${held?.pausedMs ?? ""}|${held?.channelId ?? ""}`;
   useEffect(() => {
     if (isRemote) return;
     void fetch("/api/now", {
@@ -121,7 +166,7 @@ export function ParlorApp() {
       body: JSON.stringify({
         channelId: state.tunedId,
         powered: state.powered,
-        held: held ? { channelId: held.channelId, mediaId: held.film.id, startMs: held.startMs, airing: held.airing } : null,
+        held: held ? { channelId: held.channelId, mediaId: held.film.id, startMs: held.startMs, pausedMs: held.pausedMs ?? null, airing: held.airing } : null,
       }),
     }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps -- nowKey sums up everything sent
@@ -134,14 +179,14 @@ export function ParlorApp() {
     const sync = async () => {
       const pc = (await fetch("/api/now").then((response) => response.json()).catch(() => null)) as {
         channelId?: string;
-        held?: { channelId: string; mediaId: string; startMs: number; airing: Airing } | null;
+        held?: { channelId: string; mediaId: string; startMs: number; pausedMs?: number | null; airing: Airing } | null;
       } | null;
       if (!pc?.channelId) return;
       const mine = followRef.current;
       if (pc.channelId !== mine.tunedId) parlor.dispatch({ type: "tune", id: pc.channelId });
       const film = pc.held ? catalogById.get(pc.held.mediaId) : undefined;
-      if (pc.held && film && pc.held.startMs !== mine.held?.startMs) {
-        setHeld({ channelId: pc.held.channelId, airing: pc.held.airing, film, startMs: pc.held.startMs });
+      if (pc.held && film && (pc.held.startMs !== mine.held?.startMs || (pc.held.pausedMs ?? undefined) !== mine.held?.pausedMs)) {
+        setHeld({ channelId: pc.held.channelId, airing: pc.held.airing, film, startMs: pc.held.startMs, pausedMs: pc.held.pausedMs ?? undefined });
         setSeekToken((value) => value + 1);
       } else if (!pc.held && mine.held) {
         setHeld(null);
@@ -163,14 +208,29 @@ export function ParlorApp() {
   function seekTo(ms: number) {
     if (!channel || !airing || !film || airing.slot.status !== "ready") return;
     const at = Math.min(Math.max(0, ms), airing.slot.durationMs - 5000);
-    // Landing back on the clock is just being live again.
-    if (sameProgramme && live && Math.abs(at - live.offsetMs) < 3000) return goLive();
-    setHeld({ channelId: channel.id, airing, film, startMs: Date.now() - at });
+    // Landing back on the clock is just being live again (unless the picture is stopped: then it stays stopped, there).
+    if (!paused && sameProgramme && live && Math.abs(at - live.offsetMs) < 3000) return goLive();
+    setHeld({ channelId: channel.id, airing, film, startMs: Date.now() - at, pausedMs: paused ? at : undefined });
     setSeekToken((value) => value + 1);
   }
 
-  const seekRef = useRef({ seekTo, offset: 0 });
-  seekRef.current = { seekTo, offset: airing?.offsetMs ?? 0 };
+  /**
+   * Stop the picture where it is, or let it run on from there. Like a scrub, this is a look and not
+   * an edit: the station's clock keeps running, and Live drops back onto it.
+   */
+  function togglePause() {
+    if (!channel || !airing || !film || airing.slot.status !== "ready" || !film.filePath) return;
+    if (paused && held) {
+      setHeld({ ...held, startMs: Date.now() - (held.pausedMs ?? 0), pausedMs: undefined });
+      setSeekToken((value) => value + 1);
+      return;
+    }
+    const at = airing.offsetMs;
+    setHeld({ channelId: channel.id, airing: held?.channelId === channel.id ? held.airing : airing, film, startMs: Date.now() - at, pausedMs: at });
+  }
+
+  const seekRef = useRef({ seekTo, togglePause, offset: 0 });
+  seekRef.current = { seekTo, togglePause, offset: airing?.offsetMs ?? 0 };
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target;
@@ -178,6 +238,12 @@ export function ParlorApp() {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === "ArrowLeft") seekRef.current.seekTo(seekRef.current.offset - 10_000);
       if (event.key === "ArrowRight") seekRef.current.seekTo(seekRef.current.offset + 30_000);
+      if (event.key === " " || event.key === "k" || event.key === "K") {
+        // Space would also press whatever button was last clicked, and scroll the guide. Neither is wanted.
+        event.preventDefault();
+        if (target instanceof HTMLElement && target !== document.body) target.blur();
+        seekRef.current.togglePause();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -239,11 +305,63 @@ export function ParlorApp() {
         behindMs={behindMs}
         onSeek={seekTo}
         onLive={goLive}
+        paused={paused}
+        onPause={togglePause}
       />
     ) : null;
 
+  const tab = (value: Source, label: string) => (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={source === value}
+      onClick={() => {
+        setSource(value);
+        setSettingsOpen(false);
+        parlor.setOverlay("guide");
+      }}
+      className={cn("rounded-md px-3 py-1 text-xs tracking-wide uppercase", source === value ? "bg-cream text-room" : "text-cream/70 hover:bg-cream/10 hover:text-cream")}
+    >
+      {label}
+    </button>
+  );
+
   return (
     <main ref={mainRef} className="flex h-dvh flex-col gap-3 p-3">
+      {isRemote ? null : (
+        <nav
+          aria-label="Sources"
+          onMouseEnter={() => {
+            barHover.current = true;
+            setBarShown(true);
+          }}
+          onMouseLeave={() => {
+            barHover.current = false;
+          }}
+          className={cn(
+            "fixed inset-x-0 top-0 z-50 flex items-center gap-1 bg-black/80 px-3 py-2 backdrop-blur transition-opacity duration-300",
+            barShown ? "opacity-100" : "pointer-events-none opacity-0",
+          )}
+        >
+          <div role="tablist" className="flex items-center gap-1">
+            {tab("all", "All")}
+            {tab("local", "Local")}
+            {tab("free", "Free TV")}
+          </div>
+          <span className="ml-3 text-xs text-cream/40">{source === "free" ? "Streamed from the Internet Archive · coming soon" : `${shownChannels.length} stations`}</span>
+          <button
+            type="button"
+            className={cn("ml-auto rounded-md px-3 py-1 text-xs tracking-wide uppercase", settingsOpen ? "bg-cream text-room" : "text-cream/70 hover:bg-cream/10 hover:text-cream")}
+            onClick={() => {
+              if (parlor.overlay !== "guide") parlor.setOverlay("guide");
+              setSettingsOpen((open) => !open);
+            }}
+          >
+            Settings
+            {updateReady ? <span className="ml-1.5 inline-block size-2 rounded-full bg-accent align-middle" title="An update is ready" /> : null}
+          </button>
+        </nav>
+      )}
       <p className="sr-only" aria-live="polite">
         {channel && airing ? `Station ${channel.number}. ${airing.slot.title}.` : "Joining the broadcast."}
       </p>
@@ -276,6 +394,7 @@ export function ParlorApp() {
             adjust={isRemote ? undefined : picture.value}
             compact={!full}
             seekToken={seekToken}
+            paused={paused}
             onToggleView={toggleView}
             toolbar={
               <div className="flex items-start gap-3">
@@ -375,14 +494,19 @@ export function ParlorApp() {
                 </>
                 )}
               </div>
-              <p className="mt-2 hidden text-xs text-cream/35 xl:block">↑↓ station · Backspace last · ←→ scrub · G full view · F full screen · M mute</p>
+              <p className="mt-2 hidden text-xs text-cream/35 xl:block">↑↓ station · Backspace last · Space pause · ←→ scrub · G full view · F full screen · M mute</p>
+              {!isRemote && state.channels.length <= 1 && !editing ? (
+                <p className="mt-2 text-xs text-accent/90">
+                  One station so far. <button type="button" className="underline hover:text-accent" onClick={() => { setEditId(null); setSettingsOpen(false); parlor.setOverlay("lineup"); }}>Edit stations</button> suggests more from your library: shows, genres, franchises, decades.
+                </p>
+              ) : null}
             </div>
           </section>
         )}
       </div>
 
       {full || now == null ? null : settingsOpen ? (
-        <Settings className="flex-1" onClose={() => setSettingsOpen(false)} onRescan={rescan} scanLabel={scan} onRefresh={parlor.rescan} />
+        <Settings key={vintageQuery ?? ""} className="flex-1" onClose={() => { setSettingsOpen(false); setVintageQuery(null); }} onRescan={rescan} scanLabel={scan} onRefresh={parlor.rescan} vintageQuery={vintageQuery} />
       ) : editing ? (
         <Lineup
           className="flex-1"
@@ -394,11 +518,26 @@ export function ParlorApp() {
           onRestore={parlor.restore}
           focusId={editId}
           onMenu={openMenu}
+          onVintage={(q) => {
+            setVintageQuery(q);
+            setSettingsOpen(true);
+          }}
         />
+      ) : source === "free" && shownChannels.length === 0 ? (
+        <section aria-label="Free TV" className="flex-1 overflow-y-auto rounded-screen bg-bezel p-5 text-cream">
+          <p className="text-sm text-cream/70">No free stations yet. These are the ones planned; each opens Vintage TV so the material can be downloaded now.</p>
+          <FreeChannels
+            className="mt-4"
+            onOpen={(q) => {
+              setVintageQuery(q);
+              setSettingsOpen(true);
+            }}
+          />
+        </section>
       ) : (
         <GuideGrid
           className="flex-1"
-          channels={state.channels}
+          channels={shownChannels}
           tunedId={state.tunedId}
           now={now}
           missing={parlor.missing}

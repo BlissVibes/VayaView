@@ -8,6 +8,8 @@ import { TmdbBox } from "./tmdb-box";
 import { VintageTv } from "./vintage-tv";
 
 type SettingsProps = {
+  /** Open straight into Vintage TV with this archive.org search (a free channel picked under Edit stations). */
+  vintageQuery?: string | null;
   onClose: () => void;
   onRescan: () => void;
   scanLabel: string | null;
@@ -30,10 +32,10 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
  * Everything that is set once and left: updates, look, fonts, library, phone.
  * It takes the guide's place under the picture, like Edit stations.
  */
-export function Settings({ onClose, onRescan, scanLabel, onRefresh, className }: SettingsProps) {
+export function Settings({ onClose, onRescan, scanLabel, onRefresh, vintageQuery, className }: SettingsProps) {
   // Vintage TV is big enough to want the whole panel, so it opens in place of the settings.
-  const [vintage, setVintage] = useState(false);
-  if (vintage) return <VintageTv className={className} onClose={() => setVintage(false)} onRescan={onRescan} />;
+  const [vintage, setVintage] = useState(Boolean(vintageQuery));
+  if (vintage) return <VintageTv className={className} onClose={() => setVintage(false)} onRescan={onRescan} initialQuery={vintageQuery} />;
   return (
     <section aria-label="Settings" className={cn("flex min-h-0 flex-col overflow-hidden rounded-screen bg-bezel text-cream", className)}>
       <header className="flex shrink-0 items-center gap-4 border-b border-screen px-4 py-2">

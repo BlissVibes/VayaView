@@ -723,6 +723,19 @@ export function createParlorHandler(options = {}) {
   const metaFile = path.join(dataDir, "parlor-metadata.json");
   const tmdb = { running: false, done: 0, total: 0, error: null };
 
+  /**
+   * A token shipped with the app, so nobody has to make a TMDB account to get genres. It comes from
+   * server/tmdb-key.json (written at package time from VAYAVIEW_TMDB_TOKEN; never committed) or that
+   * variable itself. A token the user saves under Settings takes its place.
+   */
+  function builtInToken() {
+    const fromEnv = (process.env.VAYAVIEW_TMDB_TOKEN ?? "").trim();
+    if (fromEnv) return fromEnv;
+    const fromFile = readJson(path.join(import.meta.dirname, "tmdb-key.json"), {}).token;
+    return typeof fromFile === "string" && fromFile.trim() ? fromFile.trim() : null;
+  }
+  const activeToken = () => readJson(tmdbFile, {}).token || builtInToken();
+
   async function tmdbGet(pathname, token, tries = 0) {
     const response = await fetch(`https://api.themoviedb.org/3${pathname}`, {
       headers: { Authorization: `Bearer ${token}`, accept: "application/json" },
@@ -764,7 +777,7 @@ export function createParlorHandler(options = {}) {
   }
 
   async function runLookups(items) {
-    const token = readJson(tmdbFile, {}).token;
+    const token = activeToken();
     if (!token || tmdb.running) return;
     const meta = readJson(metaFile, {});
     const todo = items.filter((item) => item?.key && item.title && !meta[item.key]);
@@ -790,7 +803,9 @@ export function createParlorHandler(options = {}) {
   function tmdbStatus() {
     const meta = Object.values(readJson(metaFile, {}));
     return {
-      hasToken: Boolean(readJson(tmdbFile, {}).token),
+      hasToken: Boolean(activeToken()),
+      /** True when the token in use is the one shipped with the app, not one the user saved. */
+      builtIn: !readJson(tmdbFile, {}).token && Boolean(builtInToken()),
       ...tmdb,
       matched: meta.filter((item) => item.found).length,
       unmatched: meta.filter((item) => !item.found).length,

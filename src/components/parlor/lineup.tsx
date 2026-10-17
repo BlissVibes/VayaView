@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { CATALOG, catalogById, libraryInfo } from "@/lib/library/catalog";
 import { titleCase } from "@/lib/library/naming";
 import { sanitizeState } from "@/lib/library/storage";
+import { FREE_CHANNELS, SUGGESTION_GROUPS, suggestStations, type Suggestion } from "@/lib/library/suggest";
 import type { ParlorAction } from "@/lib/library/reducer";
 import type { ParlorState } from "@/lib/library/state";
 import type { Film } from "@/lib/library/types";
@@ -24,6 +25,8 @@ type LineupProps = {
   /** Open this station in the editor (from the right-click menu). */
   focusId?: string | null;
   onMenu?: (id: string, x: number, y: number) => void;
+  /** Open Vintage TV on this archive.org search (a free channel, until those stream on their own). */
+  onVintage?: (q: string) => void;
   className?: string;
 };
 
@@ -49,8 +52,9 @@ const LIST_LIMIT = 150;
  * The station editor. It takes the guide's place under the picture, so the
  * programme keeps playing in view while stations are changed.
  */
-export function Lineup({ state, dispatch, onClose, history, onUndo, onRestore, focusId, onMenu, className }: LineupProps) {
-  const [openId, setOpenId] = useState<string | null>(focusId ?? state.tunedId);
+export function Lineup({ state, dispatch, onClose, history, onUndo, onRestore, focusId, onMenu, onVintage, className }: LineupProps) {
+  // A library with only its first station opens on the suggestions, so the next step is in view.
+  const [openId, setOpenId] = useState<string | null>(focusId ?? (state.channels.length <= 1 ? null : state.tunedId));
   useEffect(() => {
     if (focusId) setOpenId(focusId);
   }, [focusId]);
@@ -79,7 +83,7 @@ export function Lineup({ state, dispatch, onClose, history, onUndo, onRestore, f
    * Make a station. If one already has the same lineup or the same name, stop
    * and say so first; the warning offers the existing one, or to go ahead anyway.
    */
-  function createChannel(ids: string[], label: string, anyway = false) {
+  function createChannel(ids: string[], label: string, anyway = false, as: ChannelMode = mode) {
     const name = titleCase(label) || "New station";
     const matches = state.channels.filter((item) => lineupKey(item.mediaIds) === lineupKey(ids) || item.name.toLowerCase() === name.toLowerCase());
     if (matches.length > 0 && !anyway) {
@@ -88,8 +92,20 @@ export function Lineup({ state, dispatch, onClose, history, onUndo, onRestore, f
     }
     setPending(null);
     const id = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `ch-${Date.now()}`;
-    dispatch({ type: "create", id, name, query: label, mediaIds: mode === "loop" ? catalogOrder(ids) : ids, mode, now: Date.now() });
+    dispatch({ type: "create", id, name, query: label, mediaIds: as === "loop" ? catalogOrder(ids) : ids, mode: as, now: Date.now() });
     setOpenId(id);
+  }
+
+  /** Take a suggested station as it comes: its own name and order. Franchise and show lineups are already in order. */
+  function takeSuggestion(item: Suggestion) {
+    createChannel(item.mediaIds, item.name, false, item.mode);
+  }
+
+  /** Take a whole group of suggestions at once. One undo step; the set stays on the station it is on. */
+  function takeAll(items: Suggestion[]) {
+    const now = Date.now();
+    const newId = (key: string) => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `ch-${now}-${key}`);
+    dispatch({ type: "create-many", items: items.map((item) => ({ id: newId(item.key), name: item.name, mediaIds: item.mediaIds, mode: item.mode })), now });
   }
 
   /** Renumber every station in a new order. The numbers in use stay the same set, and it can be undone. */
@@ -299,7 +315,8 @@ export function Lineup({ state, dispatch, onClose, history, onUndo, onRestore, f
                 </div>
               ) : null}
               <LibraryPicker verb="Make a station of" onPick={(ids, label) => createChannel(ids, label)} placeholder="A show, a film, a genre, a director, or part of a name" />
-              <Suggestions onPick={(ids, label) => createChannel(ids, label)} />
+              <Suggestions channels={state.channels} onPick={takeSuggestion} onPickAll={takeAll} />
+              <FreeChannels onOpen={onVintage} />
             </div>
           )}
         </div>
@@ -506,46 +523,94 @@ function StationEditor({ channel, state, dispatch, conflict, setConflict, onStep
  * One-click stations from what TMDB knows: a genre with enough films, or a
  * franchise with more than one. Nothing is made until one is clicked.
  */
-function Suggestions({ onPick }: { onPick: (ids: string[], label: string) => void }) {
-  const movies = CATALOG.filter((film) => film.genres[0] === "Movie");
-  const genres = new Map<string, string[]>();
-  const sets = new Map<string, string[]>();
-  for (const film of movies) {
-    for (const genre of film.genres.slice(1)) genres.set(genre, [...(genres.get(genre) ?? []), film.id]);
-    if (film.collection) sets.set(film.collection, [...(sets.get(film.collection) ?? []), film.id]);
+/**
+ * Stations the library could have but does not yet: the two halves of it, every show, each
+ * franchise, the genres, decades, directors and themes TMDB found. One click makes one; a group
+ * can be taken whole. A station already in the lineup is not offered again.
+ */
+function Suggestions({ channels, onPick, onPickAll }: { channels: Channel[]; onPick: (item: Suggestion) => void; onPickAll: (items: Suggestion[]) => void }) {
+  const all = suggestStations(CATALOG, channels);
+  const hasMeta = CATALOG.some((film) => film.genres.length > 1 && film.genres[0] === "Movie");
+  const chip = "group/chip flex items-baseline gap-1.5 rounded-md bg-cream/10 px-2 py-1 text-left text-xs text-cream hover:bg-accent hover:text-room";
+  const small = "rounded-md px-2 py-0.5 text-[0.7rem] text-cream/60 hover:bg-cream/10 hover:text-cream";
+  if (all.length === 0) {
+    return (
+      <p className="mt-4 text-xs text-cream/40">
+        {hasMeta ? "Every station the library suggests is already in the lineup." : "Save a TMDB token under Settings › Library to get genre, franchise, director and theme stations here."}
+      </p>
+    );
   }
-  const genreList = [...genres].filter(([, ids]) => ids.length >= 5).sort((a, b) => b[1].length - a[1].length);
-  const setList = [...sets].filter(([, ids]) => ids.length >= 2).sort((a, b) => a[0].localeCompare(b[0]));
-  if (genreList.length === 0 && setList.length === 0) {
-    return <p className="mt-4 text-xs text-cream/40">Save a TMDB token under Library folder to get genre and franchise stations here.</p>;
-  }
-  const chip = "rounded-md bg-cream/10 px-2 py-1 text-xs text-cream hover:bg-accent hover:text-room";
   return (
-    <div className="mt-4 space-y-3">
-      {genreList.length > 0 ? (
-        <div>
-          <p className="mb-1.5 text-xs text-cream/55">Genres</p>
-          <div className="flex flex-wrap gap-1.5">
-            {genreList.map(([genre, ids]) => (
-              <button key={genre} type="button" className={chip} onClick={() => onPick(ids, `${genre} Movies`)}>
-                {genre} · {ids.length}
-              </button>
-            ))}
-          </div>
+    <div className="mt-5 space-y-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="text-sm text-cream/70">
+          Suggested stations <span className="text-cream/40">· {all.length}</span>
+        </p>
+        <div className="flex items-center gap-2">
+          {all.length > 1 ? (
+            <button type="button" className={small} onClick={() => onPickAll(all)} title="Make every suggested station (one undo step)">
+              Add all {all.length}
+            </button>
+          ) : null}
+          {!hasMeta ? <span className="text-[0.7rem] text-cream/40">Genres and franchises need a TMDB token (Settings › Library)</span> : null}
         </div>
-      ) : null}
-      {setList.length > 0 ? (
-        <div>
-          <p className="mb-1.5 text-xs text-cream/55">Franchises</p>
-          <div className="flex flex-wrap gap-1.5">
-            {setList.map(([name, ids]) => (
-              <button key={name} type="button" className={chip} onClick={() => onPick(ids, name.replace(/ Collection$/, ""))}>
-                {name.replace(/ Collection$/, "")} · {ids.length}
-              </button>
-            ))}
+      </div>
+      {SUGGESTION_GROUPS.map((group) => {
+        const items = all.filter((item) => item.group === group);
+        if (items.length === 0) return null;
+        return (
+          <div key={group}>
+            <div className="mb-1.5 flex items-baseline gap-2">
+              <p className="text-xs text-cream/55">{group}</p>
+              {items.length > 1 ? (
+                <button type="button" className={small} onClick={() => onPickAll(items)} title={`Make all ${items.length} ${group.toLowerCase()} stations`}>
+                  add all {items.length}
+                </button>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {items.map((item) => (
+                <button key={item.key} type="button" className={chip} onClick={() => onPick(item)} title={`${item.note} · ${item.mode === "loop" ? "in order" : "shuffled"}`}>
+                  <span>{item.name}</span>
+                  <span className="text-cream/50 group-hover/chip:text-room/70">{item.mediaIds.length}</span>
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
-      ) : null}
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Free stations to come: whole channels streamed from the Internet Archive, nothing to download.
+ * Not built yet. Each one opens Vintage TV on the same material, so it can fill the library now.
+ */
+export function FreeChannels({ onOpen, className }: { onOpen?: (q: string) => void; className?: string }) {
+  if (libraryInfo.platform === "" && !libraryInfo.folders.length) return null;
+  return (
+    <div className={className ?? "mt-6 border-t border-screen pt-4"}>
+      <div className="flex flex-wrap items-baseline gap-2">
+        <p className="text-sm text-cream/70">Free channels</p>
+        <span className="rounded bg-accent/20 px-1.5 py-0.5 text-[0.65rem] tracking-wide text-accent uppercase">coming soon</span>
+        <span className="text-xs text-cream/45">Streamed from the Internet Archive (archive.org), nothing to download. Until then, each opens Vintage TV with the same material.</span>
+      </div>
+      <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+        {FREE_CHANNELS.map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            disabled={!onOpen}
+            onClick={() => onOpen?.(item.q)}
+            title={onOpen ? "Open Vintage TV on this search" : undefined}
+            className="rounded-lg bg-cream/5 px-3 py-2 text-left hover:bg-cream/10 disabled:opacity-60"
+          >
+            <p className="text-sm text-cream">{item.name}</p>
+            <p className="mt-0.5 text-xs text-cream/55">{item.blurb}</p>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

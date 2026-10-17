@@ -147,7 +147,12 @@ export function refreshDiskState(saved: ParlorState): ParlorState {
     used.add(number);
     kept.push({ ...channel, number });
   }
-  const channels = [...kept, ...custom];
+  const channels = [...kept, ...custom].map((channel) => {
+    // The first station is made before the first scan has finished on a slow disk, so it can be
+    // saved empty. Untouched, it means "everything": fill it from today's disk.
+    if (channel.id === `${AUTO}all` && channel.mediaIds.length === 0 && !channel.edited) return { ...channel, mediaIds: CATALOG.map((film) => film.id) };
+    return channel;
+  });
   if (channels.length === 0) return saved;
   const has = (id: string | null) => id != null && channels.some((channel) => channel.id === id);
   return {

@@ -13,6 +13,9 @@ Data/
 # Vintage TV recordings (beside Data, never inside the program folder, which updates mirror over).
 Downloads/
 
+# The TMDB token packaged into the app (see README › Building). Yours; never published.
+server/tmdb-key.json
+
 # Odds and ends
 _old-icon-stuff/
 *.log

@@ -10,7 +10,7 @@
     "build": "vite build",
     "app": "vite build && electron .",
     "package": "vite build && node scripts/package.mjs",
-    "test": "node --experimental-strip-types --test src/lib/schedule/engine.test.ts src/lib/library/filename.test.ts src/lib/library/match.test.ts src/lib/library/reducer.test.ts src/lib/player/seam.test.ts",
+    "test": "node --experimental-strip-types --test src/lib/schedule/engine.test.ts src/lib/library/filename.test.ts src/lib/library/match.test.ts src/lib/library/reducer.test.ts src/lib/library/suggest.test.ts src/lib/player/seam.test.ts",
     "release": "vite build && node scripts/package.mjs --staging && node scripts/zip-release.mjs"
   },
   "devDependencies": {

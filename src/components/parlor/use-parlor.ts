@@ -29,7 +29,7 @@ export type Snapshot = { label: string; channels: Channel[]; hiddenIds?: string[
 
 const HISTORY_LIMIT = 25;
 const EDITS = new Set<ParlorAction["type"]>([
-  "create", "delete", "mode", "rename", "callsign", "number", "swap-number", "reorder", "shift", "restart", "remove-media", "set-media", "favorite", "color", "toggle-missing", "reset",
+  "create", "create-many", "delete", "mode", "rename", "callsign", "number", "swap-number", "reorder", "shift", "restart", "remove-media", "set-media", "favorite", "color", "toggle-missing", "reset",
 ]);
 
 /** One undo list per library, beside that library's saved stations. */
@@ -64,6 +64,8 @@ function describe(action: ParlorAction, state: ParlorState): string {
   switch (action.type) {
     case "create":
       return `Made ${action.name}`;
+    case "create-many":
+      return action.items.length === 1 ? `Made ${action.items[0]?.name}` : `Made ${action.items.length} stations`;
     case "delete":
       return `Removed ${name(action.id)}`;
     case "rename":

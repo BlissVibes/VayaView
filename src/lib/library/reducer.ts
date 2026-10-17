@@ -16,7 +16,11 @@ export type ParlorAction =
       mediaIds: string[];
       mode: ChannelMode;
       now: number;
+      /** False when several are made at once, so the set does not flip to each in turn. */
+      tune?: boolean;
     }
+  /** Several stations at once (a whole group of suggestions). One undo step; the set stays where it is. */
+  | { type: "create-many"; items: { id: string; name: string; mediaIds: string[]; mode: ChannelMode }[]; now: number }
   | { type: "delete"; id: string }
   | { type: "mode"; id: string; mode: ChannelMode; now: number }
   | { type: "rename"; id: string; name: string }
@@ -72,7 +76,15 @@ export function parlorReducer(state: ParlorState, action: ParlorAction): ParlorS
         mediaIds: action.mediaIds,
         query: action.query,
       };
-      return tune({ ...state, channels: [...state.channels, channel] }, channel.id);
+      const next = { ...state, channels: [...state.channels, channel] };
+      return action.tune === false ? next : tune(next, channel.id);
+    }
+    case "create-many": {
+      let next = state;
+      for (const item of action.items) {
+        next = parlorReducer(next, { type: "create", id: item.id, name: item.name, query: item.name, mediaIds: item.mediaIds, mode: item.mode, now: action.now, tune: false });
+      }
+      return next;
     }
     case "delete": {
       if (state.channels.length <= 1) return state;

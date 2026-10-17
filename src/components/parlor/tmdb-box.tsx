@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { libraryInfo } from "@/lib/library/catalog";
 
-type TmdbStatus = { hasToken: boolean; running: boolean; done: number; total: number; error: string | null; matched: number; unmatched: number };
+type TmdbStatus = { hasToken: boolean; builtIn?: boolean; running: boolean; done: number; total: number; error: string | null; matched: number; unmatched: number };
 
 const button = "rounded-md bg-cream/10 px-3 py-1.5 text-xs text-cream hover:bg-cream/20 disabled:opacity-40";
 
@@ -74,7 +74,7 @@ export function TmdbBox({ onRefresh }: { onRefresh: () => Promise<unknown> }) {
           <span className="text-cream/60">
             {status.running
               ? `Looking up ${status.done} of ${status.total}…`
-              : `Token saved · ${status.matched} titles matched${status.unmatched ? `, ${status.unmatched} not found` : ""}`}
+              : `${status.builtIn ? "Built in, no account needed" : "Token saved"} · ${status.matched} titles matched${status.unmatched ? `, ${status.unmatched} not found` : ""}`}
           </span>
           <button type="button" className={button} disabled={busy || status.running} onClick={() => lookUp(false)}>
             Look up new titles
@@ -89,7 +89,7 @@ export function TmdbBox({ onRefresh }: { onRefresh: () => Promise<unknown> }) {
           name="token"
           type="password"
           autoComplete="off"
-          placeholder={status?.hasToken ? "Paste a new token to replace the saved one" : "Paste your TMDB API Read Access Token"}
+          placeholder={status?.builtIn ? "Optional: your own TMDB token, to use instead of the built-in one" : status?.hasToken ? "Paste a new token to replace the saved one" : "Paste your TMDB API Read Access Token"}
           aria-label="TMDB API Read Access Token"
           className="min-w-0 flex-1 rounded-md bg-screen px-3 py-1.5 text-xs text-cream placeholder:text-cream/30 focus:outline-1 focus:outline-accent"
         />

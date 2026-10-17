@@ -46,7 +46,7 @@ async function json<T>(url: string, body?: unknown): Promise<T> {
   return data;
 }
 
-export function VintageTv({ onClose, onRescan, className }: { onClose: () => void; onRescan: () => void; className?: string }) {
+export function VintageTv({ onClose, onRescan, initialQuery, className }: { onClose: () => void; onRescan: () => void; /** A search to run as soon as the panel opens (a free channel picked under Edit stations). */ initialQuery?: string | null; className?: string }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Result[] | null>(null);
   const [searching, setSearching] = useState(false);
@@ -56,6 +56,11 @@ export function VintageTv({ onClose, onRescan, className }: { onClose: () => voi
   const [status, setStatus] = useState<Status | null>(null);
   const seenDone = useRef<Set<string> | null>(null);
   const [reloadNeeded, setReloadNeeded] = useState(false);
+
+  useEffect(() => {
+    if (initialQuery) void search(initialQuery);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, when the panel opens
+  }, []);
 
   async function search(q: string) {
     setQuery(q);

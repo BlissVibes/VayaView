@@ -31,6 +31,8 @@ type PictureProps = {
   footer?: ReactNode;
   /** Goes up each time the viewer scrubs or returns to live, so the picture jumps at once. */
   seekToken: number;
+  /** Stopped on a frame by the viewer. The clock-follow below leaves it be until this clears. */
+  paused?: boolean;
   onToggleView: () => void;
   className?: string;
 };
@@ -58,7 +60,7 @@ function streamUrl(mediaId: string, query: string): string {
 type Level = 0 | 1 | 2;
 
 export function Picture(props: PictureProps) {
-  const { powered, channel, airing, film, request, digits, notice, audio, sub, adjust, compact, toolbar, footer, seekToken, onToggleView, className } = props;
+  const { powered, channel, airing, film, request, digits, notice, audio, sub, adjust, compact, toolbar, footer, seekToken, paused = false, onToggleView, className } = props;
   const station = channel ? formatStation(channel.number) : "--";
   const missing = request?.status === "missing";
 
@@ -173,10 +175,18 @@ export function Picture(props: PictureProps) {
     retries.current = 0;
   }, [playKey]);
 
-  // Once a second: if the picture drifted from the clock (pause, sleep, stall), rejoin.
+  // Pause and play on the viewer's word. While paused the clock-follow below stays out of it.
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !playKey || video.readyState < 3 || video.seeking) return;
+    if (!video || !playKey) return;
+    if (paused) video.pause();
+    else if (video.paused && !video.ended) video.play().catch(() => {});
+  }, [paused, playKey]);
+
+  // Once a second: if the picture drifted from the clock (sleep, stall), rejoin.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (paused || !video || !playKey || video.readyState < 3 || video.seeking) return;
     const expected = offsetRef.current / 1000 - baseRef.current;
     if (level === 0) {
       if (Math.abs(video.currentTime - expected) > 4 && expected < video.duration) video.currentTime = expected;
@@ -187,7 +197,7 @@ export function Picture(props: PictureProps) {
       setReload((value) => value + 1);
     }
     if (video.paused && !video.ended) video.play().catch(() => {});
-  }, [airing?.offsetMs, playKey, level]);
+  }, [airing?.offsetMs, playKey, level, paused]);
 
   // A scrub, or a return to live: jump now. A session cannot seek, so it is restarted at the new spot.
   const lastSeek = useRef({ token: seekToken, key: playKey });
@@ -417,6 +427,12 @@ export function Picture(props: PictureProps) {
       {live && muted ? (
         <p className="absolute top-3 left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-xs text-cream">
           Muted · click the picture for sound
+        </p>
+      ) : null}
+
+      {live && paused ? (
+        <p className="pointer-events-none absolute top-1/2 left-1/2 z-20 -translate-x-1/2 -translate-y-1/2 rounded-full bg-black/60 px-5 py-2 text-sm tracking-[0.2em] text-cream uppercase">
+          ❚❚ Paused
         </p>
       ) : null}
 

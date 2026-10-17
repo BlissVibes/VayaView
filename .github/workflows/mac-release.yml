@@ -33,6 +33,8 @@ jobs:
       - run: npm ci
       - run: npx vite build
       - run: node scripts/package.mjs --mac
+        env:
+          VAYAVIEW_TMDB_TOKEN: ${{ secrets.TMDB_TOKEN }}
       - name: Sign (ad-hoc) and zip
         run: |
           for arch in arm64 x64; do
